@@ -47,7 +47,7 @@ setup_vision_env() {
 setup_sim_rust_env() {
   _prepend_ld_path "${ROOT_DIR}/.rust/target/release"
   local std_so=""
-  std_so="$(find "${ROOT_DIR}/.rust/rustup" -maxdepth 6 -name 'libstd-*.so' 2>/dev/null | head -n 1 || true)"
+  std_so="$(find "${ROOT_DIR}/.rust/rustup" -maxdepth 8 -name 'libstd-*.so' 2>/dev/null | head -n 1 || true)"
   if [[ -n "${std_so}" ]]; then
     _prepend_ld_path "$(dirname "${std_so}")"
   fi

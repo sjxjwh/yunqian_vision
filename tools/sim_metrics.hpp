@@ -33,6 +33,17 @@ struct SimHitEvent
   int armor_id = -1;
 };
 
+struct SimShotResolution
+{
+  uint64_t shot_id = 0;
+  int outcome = 0;          // 1=命中, 0=飞过脱靶, -1=被机身圆柱遮挡
+  double flight_time = 0.0; // s
+  double hit_y_norm = 0.0;  // 命中时或最近穿越正面装甲平面时的带符号归一化 y 偏移
+  double hit_z_norm = 0.0;  // 命中时或最近穿越正面装甲平面时的带符号归一化 z 偏移
+  double cos_inc = 0.0;     // 命中或最近穿越时的 3D 入射角余弦
+  bool has_plane_cross = false;
+};
+
 struct SimMetricsSnapshot
 {
   uint32_t shots = 0;
@@ -46,6 +57,7 @@ struct SimMetricsSnapshot
   double yaw_err_rms = 0.0;  // rad
   std::vector<std::array<double, 3>> bullets;
   std::vector<SimHitEvent> recent_hits;
+  std::vector<SimShotResolution> resolved_shots;
 };
 
 // 仿真闭环定量评估器：
@@ -67,13 +79,15 @@ public:
     double plan_pitch, bool fire_cmd, double bullet_speed,
     const std::vector<SimArmorPlate> & armors,
     const Eigen::Vector3d & muzzle_origin = Eigen::Vector3d::Zero(),
-    const Eigen::Vector3d & self_vel = Eigen::Vector3d::Zero());
+    const Eigen::Vector3d & self_vel = Eigen::Vector3d::Zero(),
+    uint64_t * out_fired_shot_id = nullptr);
 
   void reset();
 
 private:
   struct Bullet
   {
+    uint64_t id = 0;
     double t0 = 0.0;
     double last_t = 0.0;
     Eigen::Vector3d p0{0, 0, 0};
@@ -81,6 +95,11 @@ private:
     Eigen::Vector3d vel{0, 0, 0};
     Eigen::Vector3d prev_pos{0, 0, 0};
     double max_dist = 12.0;
+    bool has_plane_cross = false;
+    double best_cross_r = 1e9;
+    double cross_y_norm = 0.0;
+    double cross_z_norm = 0.0;
+    double cross_cos_inc = 0.0;
   };
 
   double fire_interval_ = 0.1;
@@ -92,6 +111,7 @@ private:
   uint32_t hits_ = 0;
   uint32_t resolved_ = 0;
   uint32_t next_hit_id_ = 1;
+  uint64_t next_shot_id_ = 1;
   uint64_t err_samples_ = 0;
   uint64_t fire_samples_ = 0;
   double yaw_err_sq_sum_ = 0.0;
@@ -100,9 +120,18 @@ private:
   std::vector<SimHitEvent> recent_hits_;
   std::ofstream csv_;
 
-  static bool intersect_plate(
-    const Eigen::Vector3d & p_prev, const Eigen::Vector3d & p_curr, const SimArmorPlate & plate,
-    double & out_alpha);
+  struct PlateCrossInfo
+  {
+    bool crossed = false;
+    bool hit = false;
+    double alpha = 0.0;
+    double y_norm = 0.0;
+    double z_norm = 0.0;
+    double cos_inc = 0.0;
+  };
+
+  static PlateCrossInfo intersect_plate(
+    const Eigen::Vector3d & p_prev, const Eigen::Vector3d & p_curr, const SimArmorPlate & plate);
 };
 
 }  // namespace tools

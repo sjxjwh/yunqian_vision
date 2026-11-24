@@ -3,13 +3,15 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <opencv2/opencv.hpp>
 #ifdef __linux__
-#include <fstream>
 #include <pthread.h>
 #include <sched.h>
 #endif
@@ -38,6 +40,7 @@ const std::string keys =
   "{mode m         |                        | 控制模式：aimer 或 planner（留空按 yaml use_planner）}"
   "{log l          |                        | 可选：导出逐帧评估指标 CSV 路径}"
   "{gimbal-log g   |                        | 可选：导出逐帧当前云台/下发指令 CSV 路径（实机串口符号约定）}"
+  "{dump-shots     |                        | 可选：导出每发弹丸特征与 recon/gt 结算对比 CSV 路径}"
   "{fire-hz f      | 20.0                   | 虚拟发弹评估射频 (Hz)，与仿真 cooldown=0.05s 对齐}"
   "{corrector      | false                  | 启用视觉弹道闭环预览（在画面叠加虚拟弹道/ROI/检测配对）}"
   "{profile p      | false                  | 每秒输出视觉/控制分项耗时与帧率抖动(avg/p95/max/std) }"
@@ -184,9 +187,9 @@ int main(int argc, char * argv[])
     if (!best) return out;
     const auto & r = *best;
     const Eigen::Vector3d rel_center = r.pos_world - odom_pos;
-    // 若与当前 EKF 目标匹配且仿真未发布子底盘旋转角，将 EKF 装甲环刚性平移到仿真真值 XY 中心，
-    // 保留真实深度/横向偏差惩罚，同时对齐真实旋转相位与装甲高度。
-    if (has_ekf && std::abs(r.vyaw) < 1e-3 && best_d < 0.6) {
+    // 若与当前 EKF 目标匹配且仿真未发布子底盘旋转角（父实体物理抖动 < 0.5 rad/s 视为未发布），
+    // 将 EKF 装甲环刚性平移到仿真真值 XY 中心，保留真实深度/横向偏差惩罚，同时对齐真实旋转相位与装甲高度。
+    if (has_ekf && !r.is_outpost && std::abs(r.vyaw) < 0.5 && best_d < 0.6) {
       const Eigen::Vector2d dxy = rel_center.head<2>() - ekf_xy;
       last_gt_dxy = dxy;
       out.reserve(ekf_plates.size());
@@ -244,6 +247,72 @@ int main(int argc, char * argv[])
       tools::logger()->warn("[Sim] 无法打开云台 CSV：{}", gimbal_log_path);
     }
   }
+
+  struct ShotDumpRecord
+  {
+    uint64_t dump_id = 0;
+    double t_sec = 0.0;
+    auto_aim::FireDiagnostics diag{};
+    double muzzle_yaw_vel = 0.0;
+    double muzzle_pitch_vel = 0.0;
+    Eigen::Vector2d gt_dxy = Eigen::Vector2d::Zero();
+    bool has_recon = false;
+    bool has_gt = false;
+    tools::SimShotResolution recon_res{};
+    tools::SimShotResolution gt_res{};
+  };
+  std::ofstream shot_dump_csv;
+  std::unordered_map<uint64_t, ShotDumpRecord> pending_dumps;
+  std::unordered_map<uint64_t, uint64_t> recon_sid_to_dump;
+  std::unordered_map<uint64_t, uint64_t> gt_sid_to_dump;
+  uint64_t next_dump_id = 1;
+  auto dump_shots_path = cli.get<std::string>("dump-shots");
+  if (dump_shots_path == "true") {
+    tools::logger()->warn(
+      "[Sim] 检测到 --dump-shots 未带 '='，请使用 --dump-shots=path.csv 指定路径");
+    dump_shots_path.clear();
+  }
+  if (!dump_shots_path.empty()) {
+    shot_dump_csv.open(dump_shots_path, std::ios::out | std::ios::trunc);
+    if (shot_dump_csv.is_open()) {
+      shot_dump_csv
+        << "dump_id,t_sec,recon_outcome,gt_outcome,recon_ft,gt_ft,"
+           "recon_y,recon_z,recon_cos,gt_y,gt_z,gt_cos,"
+           "pred_valid,pred_y,pred_z,pred_cos,dist,fly_time,is_big,"
+           "target_w,target_v_tan,self_speed,self_roll,"
+           "ekf_sig_phase,ekf_sig_pos,ekf_sig_r,jumped,"
+           "yaw_err_deg,pitch_err_deg,muzzle_yaw_vel,muzzle_pitch_vel,gt_dx,gt_dy,"
+           "p_phys,sigma_y_m,sigma_z_m\n";
+      tools::logger()->info("[Sim] 逐发归因日志写入 {}", dump_shots_path);
+    } else {
+      tools::logger()->warn("[Sim] 无法打开逐发归因 CSV：{}", dump_shots_path);
+    }
+  }
+  auto flush_dump_if_ready = [&](uint64_t dump_id) {
+    auto it = pending_dumps.find(dump_id);
+    if (it == pending_dumps.end()) return;
+    const auto & rec = it->second;
+    if (!rec.has_recon || !rec.has_gt) return;
+    constexpr double R2D = 180.0 / M_PI;
+    shot_dump_csv << std::fixed << std::setprecision(5) << rec.dump_id << ',' << rec.t_sec << ','
+                  << rec.recon_res.outcome << ',' << rec.gt_res.outcome << ','
+                  << rec.recon_res.flight_time << ',' << rec.gt_res.flight_time << ','
+                  << rec.recon_res.hit_y_norm << ',' << rec.recon_res.hit_z_norm << ','
+                  << rec.recon_res.cos_inc << ',' << rec.gt_res.hit_y_norm << ','
+                  << rec.gt_res.hit_z_norm << ',' << rec.gt_res.cos_inc << ','
+                  << (rec.diag.valid ? 1 : 0) << ',' << rec.diag.hit_y_norm << ','
+                  << rec.diag.hit_z_norm << ',' << rec.diag.cos_inc << ',' << rec.diag.dist << ','
+                  << rec.diag.fly_time << ',' << (rec.diag.is_big_armor ? 1 : 0) << ','
+                  << rec.diag.target_w << ',' << rec.diag.target_v_tan << ','
+                  << rec.diag.self_speed << ',' << rec.diag.self_roll << ','
+                  << rec.diag.ekf_sigma_phase << ',' << rec.diag.ekf_sigma_pos << ','
+                  << rec.diag.ekf_sigma_r << ',' << (rec.diag.target_jumped ? 1 : 0) << ','
+                  << rec.diag.yaw_err * R2D << ',' << rec.diag.pitch_err * R2D << ','
+                  << rec.muzzle_yaw_vel << ',' << rec.muzzle_pitch_vel << ',' << rec.gt_dxy.x()
+                  << ',' << rec.gt_dxy.y() << ',' << rec.diag.p_phys << ',' << rec.diag.sigma_y_m
+                  << ',' << rec.diag.sigma_z_m << '\n';
+    pending_dumps.erase(it);
+  };
 
 #ifdef __linux__
   if (!infer_cpus.empty()) {
@@ -479,6 +548,9 @@ int main(int argc, char * argv[])
               muzzle_q = live_muzzle_q;
               R_muzzle2world = live_muzzle_q.toRotationMatrix();
               muzzle_ypr = tools::eulers(R_muzzle2world, 2, 1, 0);
+              if (muzzle_in_gimbal.squaredNorm() > 1e-12) {
+                muzzle_origin = R_muzzle2world * muzzle_in_gimbal;
+              }
               last_live_seq = live_seq;
             }
           }
@@ -592,6 +664,9 @@ int main(int argc, char * argv[])
           if (reset_metrics_req.exchange(false, std::memory_order_acq_rel)) {
             metrics.reset();
             gt_metrics.reset();
+            pending_dumps.clear();
+            recon_sid_to_dump.clear();
+            gt_sid_to_dump.clear();
           }
           Eigen::Vector3d eval_ypr = muzzle_ypr;
           if (!sim_following) {
@@ -603,20 +678,65 @@ int main(int argc, char * argv[])
           }
           const double recon_ref_yaw = sim_following ? plan.ref_yaw : plan.target_yaw;
           const double recon_ref_pitch = sim_following ? plan.ref_pitch : plan.target_pitch;
+          uint64_t recon_fired_sid = 0;
           auto msnap = metrics.update(
             t_sec, eval_ypr, command.control, recon_ref_yaw, recon_ref_pitch, command.shoot,
-            bullet_speed, sim_plates, muzzle_origin, self_vel);
+            bullet_speed, sim_plates, muzzle_origin, self_vel, &recon_fired_sid);
 
           std::vector<io::talos::GroundTruthRobot> gt_robots;
           Eigen::Vector3d live_odom = camera.gimbal_in_world();
           camera.client().peek_odom_pos(live_odom);
           const bool has_gt = camera.client().peek_ground_truth(gt_robots);
           tools::SimMetricsSnapshot gsnap{};
+          uint64_t gt_fired_sid = 0;
           if (has_gt) {
             auto gt_plates = build_gt_plates(gt_robots, live_odom, sim_plates);
             gsnap = gt_metrics.update(
               t_sec, muzzle_ypr, command.control && sim_following, plan.ref_yaw, plan.ref_pitch,
-              command.shoot && sim_following, bullet_speed, gt_plates, muzzle_origin, self_vel);
+              command.shoot && sim_following, bullet_speed, gt_plates, muzzle_origin, self_vel,
+              &gt_fired_sid);
+          }
+
+          if (shot_dump_csv.is_open()) {
+            if (recon_fired_sid > 0 && gt_fired_sid > 0) {
+              const uint64_t did = next_dump_id++;
+              ShotDumpRecord rec;
+              rec.dump_id = did;
+              rec.t_sec = t_sec;
+              rec.diag = plan.diag;
+              rec.muzzle_yaw_vel = muzzle_yaw_vel;
+              rec.muzzle_pitch_vel = muzzle_pitch_vel;
+              rec.gt_dxy = last_gt_dxy;
+              pending_dumps.emplace(did, rec);
+              recon_sid_to_dump[recon_fired_sid] = did;
+              gt_sid_to_dump[gt_fired_sid] = did;
+            }
+            for (const auto & r : msnap.resolved_shots) {
+              auto mit = recon_sid_to_dump.find(r.shot_id);
+              if (mit != recon_sid_to_dump.end()) {
+                const uint64_t did = mit->second;
+                recon_sid_to_dump.erase(mit);
+                auto pit = pending_dumps.find(did);
+                if (pit != pending_dumps.end()) {
+                  pit->second.has_recon = true;
+                  pit->second.recon_res = r;
+                  flush_dump_if_ready(did);
+                }
+              }
+            }
+            for (const auto & r : gsnap.resolved_shots) {
+              auto mit = gt_sid_to_dump.find(r.shot_id);
+              if (mit != gt_sid_to_dump.end()) {
+                const uint64_t did = mit->second;
+                gt_sid_to_dump.erase(mit);
+                auto pit = pending_dumps.find(did);
+                if (pit != pending_dumps.end()) {
+                  pit->second.has_gt = true;
+                  pit->second.gt_res = r;
+                  flush_dump_if_ready(did);
+                }
+              }
+            }
           }
 
           view.stamp_ns = static_cast<uint64_t>(
@@ -865,7 +985,9 @@ int main(int argc, char * argv[])
         shared.muzzle_pitch_vel = muzzle_pitch_vel;
         shared.R_muzzle2world = R_muzzle2world;
         shared.muzzle_origin = muzzle_origin;
-        shared.muzzle_in_gimbal = camera.muzzle_in_gimbal();
+        // Planner::muzzle_offset_in_world 用 R_muzzle2world 旋转 muzzle_in_gimbal，
+        // 这里换算到炮口系（吸收 pose_correction 25° 偏置），与 muzzle_origin 严格对齐。
+        shared.muzzle_in_gimbal = R_muzzle2world.transpose() * muzzle_origin;
         shared.self_vel = self_vel;
         shared.chassis_rpy = chassis_rpy;
         shared.target = targets.empty() ? std::nullopt : std::optional<auto_aim::Target>(targets.front());

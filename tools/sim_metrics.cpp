@@ -108,10 +108,10 @@ void SimMetrics::reset()
   bullets_.clear();
 }
 
-bool SimMetrics::intersect_plate(
-  const Eigen::Vector3d & p_prev, const Eigen::Vector3d & p_curr, const SimArmorPlate & plate,
-  double & out_alpha)
+SimMetrics::PlateCrossInfo SimMetrics::intersect_plate(
+  const Eigen::Vector3d & p_prev, const Eigen::Vector3d & p_curr, const SimArmorPlate & plate)
 {
+  PlateCrossInfo info;
   const Eigen::Matrix3d R =
     plate_rotation(plate.ring_roll, plate.ring_pitch, plate.yaw, plate.mount_pitch);
   const Eigen::Vector3d a = R.transpose() * (p_prev - plate.center);
@@ -120,7 +120,7 @@ bool SimMetrics::intersect_plate(
   // 装甲板局部系中 +X 指向车体内部、-X 为正面外法向，Y 为宽度，Z 为高度。
   // 仅允许正面入射（从 -X 外侧飞向 +X 内侧），拒绝从背面穿透判命中。
   const double dx = b.x() - a.x();
-  if (dx <= 1e-9) return false;
+  if (dx <= 1e-9) return info;
 
   double alpha = 0.0;
   if (a.x() <= 0.0 && b.x() >= 0.0) {
@@ -130,25 +130,29 @@ bool SimMetrics::intersect_plate(
   } else if (a.x() >= -BULLET_RADIUS && a.x() <= BULLET_RADIUS) {
     alpha = 0.0;
   } else {
-    return false;
+    return info;
   }
 
   const Eigen::Vector3d hit = a + alpha * (b - a);
   const double half_w = plate.width * 0.5 + BULLET_RADIUS;
   const double half_h = plate.height * 0.5 + BULLET_RADIUS;
-  if (std::abs(hit.y()) <= half_w && std::abs(hit.z()) <= half_h) {
-    out_alpha = alpha;
-    return true;
-  }
-  return false;
+  const double seg_len = (b - a).norm();
+  info.crossed = true;
+  info.alpha = alpha;
+  info.y_norm = hit.y() / std::max(1e-6, plate.width * 0.5);
+  info.z_norm = hit.z() / std::max(1e-6, plate.height * 0.5);
+  info.cos_inc = (seg_len > 1e-9) ? (dx / seg_len) : 0.0;
+  info.hit = (std::abs(hit.y()) <= half_w && std::abs(hit.z()) <= half_h);
+  return info;
 }
 
 SimMetricsSnapshot SimMetrics::update(
   double t_sec, const Eigen::Vector3d & muzzle_ypr, bool control, double plan_yaw,
   double plan_pitch, bool fire_cmd, double bullet_speed,
   const std::vector<SimArmorPlate> & armors, const Eigen::Vector3d & muzzle_origin,
-  const Eigen::Vector3d & self_vel)
+  const Eigen::Vector3d & self_vel, uint64_t * out_fired_shot_id)
 {
+  if (out_fired_shot_id) *out_fired_shot_id = 0;
   // 仿真重启或时间回退时清空飞行中弹丸
   if (last_t_ >= 0.0 && (t_sec < last_t_ || t_sec - last_t_ > 1.0)) {
     bullets_.clear();
@@ -185,15 +189,16 @@ SimMetricsSnapshot SimMetrics::update(
   }
   if (has_body) {
     body_center /= static_cast<double>(armors.size());
-    double sum_r = 0.0;
+    double min_r = 1e9;
     for (const auto & plate : armors) {
-      sum_r += (plate.center - body_center).head<2>().norm();
+      min_r = std::min(min_r, (plate.center - body_center).head<2>().norm());
     }
-    body_radius = std::max(0.08, (sum_r / static_cast<double>(armors.size())) - 0.035);
+    body_radius = std::max(0.06, min_r - 0.055);
   }
 
   std::vector<Bullet> remaining;
   remaining.reserve(bullets_.size());
+  std::vector<SimShotResolution> resolved_this_step;
 
   for (auto & b : bullets_) {
     const double dt = t_sec - b.t0;
@@ -238,11 +243,23 @@ SimMetricsSnapshot SimMetrics::update(
     bool hit = false;
     double best_alpha = 2.0;
     int best_armor_id = -1;
+    PlateCrossInfo best_hit_info;
     for (int idx = 0; idx < static_cast<int>(armors.size()); ++idx) {
-      double alpha = 0.0;
-      if (intersect_plate(b.prev_pos, curr_pos, armors[idx], alpha) && alpha < best_alpha) {
-        best_alpha = alpha;
+      const auto info = intersect_plate(b.prev_pos, curr_pos, armors[idx]);
+      if (info.crossed) {
+        const double r_norm = std::hypot(info.y_norm, info.z_norm);
+        if (r_norm < b.best_cross_r) {
+          b.best_cross_r = r_norm;
+          b.has_plane_cross = true;
+          b.cross_y_norm = info.y_norm;
+          b.cross_z_norm = info.z_norm;
+          b.cross_cos_inc = info.cos_inc;
+        }
+      }
+      if (info.hit && info.alpha < best_alpha) {
+        best_alpha = info.alpha;
         best_armor_id = idx;
+        best_hit_info = info;
         hit = true;
       }
     }
@@ -261,16 +278,22 @@ SimMetricsSnapshot SimMetrics::update(
       const Eigen::Vector3d hit_pos = b.prev_pos + best_alpha * (curr_pos - b.prev_pos);
       recent_hits_.push_back(
         {next_hit_id_++, t_sec, hit_pos.x(), hit_pos.y(), hit_pos.z(), best_armor_id});
+      resolved_this_step.push_back(
+        {b.id, 1, dt, best_hit_info.y_norm, best_hit_info.z_norm, best_hit_info.cos_inc, true});
       continue;
     }
     if (blocked_by_body) {
       resolved_++;
+      resolved_this_step.push_back(
+        {b.id, -1, dt, b.cross_y_norm, b.cross_z_norm, b.cross_cos_inc, b.has_plane_cross});
       continue;
     }
 
     const double dist_limit = (target_max_dist > 0.2) ? (target_max_dist + 0.6) : b.max_dist;
     if (curr_pos.norm() > dist_limit || dt > MAX_FLIGHT_TIME || curr_pos.z() < -1.5) {
       resolved_++;
+      resolved_this_step.push_back(
+        {b.id, 0, dt, b.cross_y_norm, b.cross_z_norm, b.cross_cos_inc, b.has_plane_cross});
       continue;
     }
 
@@ -288,6 +311,7 @@ SimMetricsSnapshot SimMetrics::update(
     const double sp = std::sin(muzzle_ypr[1]);
 
     Bullet b;
+    b.id = next_shot_id_++;
     b.t0 = t_sec;
     b.last_t = t_sec;
     b.p0 = muzzle_origin;
@@ -300,6 +324,7 @@ SimMetricsSnapshot SimMetrics::update(
     bullets_.push_back(b);
     shots_++;
     last_shot_t_ = t_sec;
+    if (out_fired_shot_id) *out_fired_shot_id = b.id;
   }
 
   SimMetricsSnapshot snap;
@@ -317,6 +342,7 @@ SimMetricsSnapshot SimMetrics::update(
     snap.bullets.push_back({b.prev_pos.x(), b.prev_pos.y(), b.prev_pos.z()});
   }
   snap.recent_hits = recent_hits_;
+  snap.resolved_shots = std::move(resolved_this_step);
 
   if (csv_.is_open()) {
     constexpr double R2D = 180.0 / M_PI;

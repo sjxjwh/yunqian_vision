@@ -203,6 +203,7 @@ AimCorrector::AimCorrector(const std::string & config_path)
   window_ = yaml_or(y, "corrector_window", window_);
   max_step_ = yaml_or(y, "corrector_max_step", max_step_);
   min_shots_ = yaml_or(y, "corrector_min_shots", min_shots_);
+  sync_sigma_ = yaml_or(y, "corrector_sync_sigma", sync_sigma_);
   det_.h_lo = yaml_or(y, "bullet_h_lo", det_.h_lo);
   det_.h_hi = yaml_or(y, "bullet_h_hi", det_.h_hi);
   det_.s_min = yaml_or(y, "bullet_s_min", det_.s_min);
@@ -225,6 +226,7 @@ AimCorrector::AimCorrector(const std::string & config_path)
   reg("corrector.window", "估计窗口（最近几发）", 1, 50, window_, "corrector_window", 1);
   reg("corrector.min_shots", "给出建议的最少发数", 1, 30, min_shots_, "corrector_min_shots", 1);
   reg("corrector.auto_apply", "自动写入 offset (0/1)", 0, 1, auto_apply_, "", 1);
+  reg("corrector.sync_sigma", "自动同步实测散布至 Planner (0/1)", 0, 1, sync_sigma_, "corrector_sync_sigma", 1);
   reg("corrector.max_step", "自动写入每发最大改动 (度)", 0, 2, max_step_, "corrector_max_step");
   reg("corrector.detect_all", "全图检测弹丸（调 HSV 用，较耗 CPU）(0/1)", 0, 1, detect_all_, "", 1);
 }
@@ -359,6 +361,7 @@ void AimCorrector::finalize(const Shot & s)
   while (results_.size() > 50) results_.pop_front();
   ++shots_matched_;
   maybe_auto_apply();
+  maybe_sync_sigma();
 }
 
 bool AimCorrector::estimate(double & ey, double & ep, double & sy, double & sp, int & n) const
@@ -393,6 +396,25 @@ void AimCorrector::maybe_auto_apply()
   step("aimer.pitch_offset", -ep);
   step("planner.yaw_offset", -ey);
   step("planner.pitch_offset", -ep);
+}
+
+void AimCorrector::maybe_sync_sigma()
+{
+  if (sync_sigma_ < 0.5) return;
+  double ey, ep, sy, sp;
+  int n;
+  if (!estimate(ey, ep, sy, sp, n)) return;
+  auto & rp = tools::RuntimeParams::instance();
+  auto ema_update = [&](const char * key, double meas_deg) {
+    const auto cur = rp.get(key);
+    if (!cur) return;
+    const double clamped = std::clamp(meas_deg, 0.05, 3.0);
+    // 一阶指数滑动平均，既能响应实车机械/弹速散布变化，又避免小样本单发跳变
+    constexpr double ALPHA = 0.30;
+    rp.set(key, (1.0 - ALPHA) * (*cur) + ALPHA * clamped);
+  };
+  ema_update("planner.gun_sigma_yaw", sy);
+  ema_update("planner.gun_sigma_pitch", sp);
 }
 
 bool AimCorrector::apply_suggestion(std::string & msg)

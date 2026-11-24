@@ -145,6 +145,7 @@ private:
   double min_samples_ = 2;      // 每发至少几个观测才算数
   double window_ = 10;          // 估计用最近几发
   double auto_apply_ = 0;       // 1 = 自动写 offset
+  double sync_sigma_ = 1;       // 1 = 自动将实测角度散布 (sy, sp) 同步写入 Planner
   double max_step_ = 0.3;       // 自动写入时每发最多改多少度
   double min_shots_ = 5;        // 至少几发才给建议 / 自动写入
   double detect_all_ = 0;       // 1 = 全图检测（调 HSV 用，较耗时）
@@ -153,6 +154,7 @@ private:
   void finalize(const Shot & s);
   bool estimate(double & ey, double & ep, double & sy, double & sp, int & n) const;
   void maybe_auto_apply();
+  void maybe_sync_sigma();
 };
 
 }  // namespace auto_aim

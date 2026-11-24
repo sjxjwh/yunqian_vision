@@ -168,6 +168,10 @@ target_link_libraries(uvl_tracker_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET
 add_executable(shoot_on_move_test tests/shoot_on_move_test.cpp)
 target_link_libraries(shoot_on_move_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim sim_io tools)
 
+# Layer 2 物理不确定度命中概率 P_phys 与 AimCorrector 散布注入 Pareto 对比测试。
+add_executable(fire_prob_test tests/fire_prob_test.cpp)
+target_link_libraries(fire_prob_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim sim_io tools)
+
 # 实机相机识别 + WebViewer 实时网页预览（无头 SSH 可直接看实时识别与 3D 重建）。
 add_executable(camera_web_test tests/camera_web_test.cpp)
 target_link_libraries(camera_web_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim tools io)
@@ -175,6 +179,7 @@ if(TBB_LIBRARY)
   target_link_libraries(aim_corrector_test ${TBB_LIBRARY})
   target_link_libraries(uvl_tracker_test ${TBB_LIBRARY})
   target_link_libraries(shoot_on_move_test ${TBB_LIBRARY})
+  target_link_libraries(fire_prob_test ${TBB_LIBRARY})
 endif()
 
 # 检查 ROS 环境

@@ -66,6 +66,20 @@ fire_thresh: 0.005
 shoot_offset: 2
 fire_margin: 0.85
 max_fire_angle: 55 # degree
+# Layer 2 物理不确定度 + Layer 3 残差 MLP 距离自适应概率开火（fire_prob_thresh=0 回退固定 fire_margin）
+# 中近距 (<=3.0m) 0.70 保爆发不弱于常规；远距 (>=5.0m) 0.82 自动切换远程 Peek 保命中率与 2027 规则 eta
+fire_prob_thresh: 0.70
+fire_prob_thresh_far: 0.82
+fire_prob_dist_near: 3.0
+fire_prob_dist_far: 5.0
+use_fire_mlp: true
+# 机械组可保证 5m 静止散布在单块小装甲板内 (3σ <= 67.5mm -> σ <= 0.25°)，默认先验 0.20°；开启 AimCorrector 后由实测散布自动 EMA 更新
+gun_sigma_yaw_deg: 0.20
+gun_sigma_pitch_deg: 0.20
+fire_delay_jitter_s: 0.005
+# 单块装甲板防吞弹建议射频区间 (Hz)：2027 17mm 最小检测间隔 50ms (20Hz)，工程保守 10Hz 防吞弹；换板或强制爆发时直接给上限
+min_fire_rate_hz: 6.0
+max_fire_rate_hz: 10.0
 # 真实云台 yaw: 额定3.5Nm/峰值12.5Nm, J=0.0146 kg*m^2 -> 实测有效峰值 114.5 rad/s^2、DM4310 规划上限 210；
 # 100 Hz 闭环实测 180.0 兼顾小陀螺快速换板与无过冲，缩短换板死区拉长开火占空比
 max_yaw_acc: 180.0

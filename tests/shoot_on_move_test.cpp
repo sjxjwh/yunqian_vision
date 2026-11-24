@@ -30,6 +30,8 @@ ScenarioResult run_closed_loop(
   double duration_s = 6.0)
 {
   auto_aim::Planner planner(config_path);
+  // 跑打补偿单元测试固定使用几何 fire_margin，避免受 YAML 远距 Peek 阈值影响断言
+  planner.set_fire_prob_thresh(0.0);
   auto gimbal_model = io::SimGimbalModel::from_yaml(config_path);
   const double bullet_speed = 25.0;
   const double air_k = planner.air_k();
@@ -52,6 +54,8 @@ ScenarioResult run_closed_loop(
     if (k > 0) {
       // 真实世界：敌方旋转且位置相对我方移动（我方以 v_self_true 跑打）
       target.predict(dt, v_self_true);
+      // 单元测试无视觉 update()，清空持续累加的过程噪声协方差 P，避免 6s 纯预测导致 P 发散到数十米
+      const_cast<tools::ExtendedKalmanFilter &>(target.ekf()).P.setZero();
     }
 
     const Eigen::Vector2d cur_yp = gimbal_model.state_yp();
