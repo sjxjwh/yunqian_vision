@@ -1,4 +1,6 @@
-# 同济大学SuperPower战队25赛季自瞄算法开源
+# yunqian_vision
+
+> 本项目基于同济大学 SuperPower 战队开源项目 [sp_vision_25](https://github.com/TongjiSuperPower/sp_vision_25) 进行二次开发，面向 RoboMaster 2027 赛季视觉与自瞄系统。以下文档保留了上游基线的架构与算法说明。
 
 ## 本项目亮点
 - 无ROS依赖*，新同学无需学习ROS相关知识就能上手自瞄。
@@ -343,16 +345,5 @@ DPS = 单位时间射击窗口占比 \times 射频 \times 单发子弹伤害
 [8] 王洪玺, 计泽贤, 张兰勇. 基于卡尔曼滤波的目标识别跟踪与射击系统设计[J]. Journal of Ordnance Equipment Engineering, 2022, 43(11). 
 
 
-## 项目成员
-王骁扬、杨佳轩、奚睿豪、俞选涛、吴圳楠、杨瑞灵、程翔宇
-
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=TongjiSuperPower%2Fsp_vision_25&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=TongjiSuperPower/sp_vision_25&type=date&theme=dark&legend=top-left&sealed_token=ifWGFqq_ElJpScxgAFKO8BboyOTUZ7UvmGX_FDb8M3EytZ2a3qOvkJARNr6wbbR79pN7ZrnfbrvQb6--vKpNWyd7zU9-cRyttkpGLJgRb34IRgg-hm7WiSvjBFqnQT07y2WkuGQbwbNO_Nc48xVMauzfDNriwu_Sy5BaifuBcxqr3SnFmj0w4meZIMfr" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=TongjiSuperPower/sp_vision_25&type=date&legend=top-left&sealed_token=ifWGFqq_ElJpScxgAFKO8BboyOTUZ7UvmGX_FDb8M3EytZ2a3qOvkJARNr6wbbR79pN7ZrnfbrvQb6--vKpNWyd7zU9-cRyttkpGLJgRb34IRgg-hm7WiSvjBFqnQT07y2WkuGQbwbNO_Nc48xVMauzfDNriwu_Sy5BaifuBcxqr3SnFmj0w4meZIMfr" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=TongjiSuperPower/sp_vision_25&type=date&legend=top-left&sealed_token=ifWGFqq_ElJpScxgAFKO8BboyOTUZ7UvmGX_FDb8M3EytZ2a3qOvkJARNr6wbbR79pN7ZrnfbrvQb6--vKpNWyd7zU9-cRyttkpGLJgRb34IRgg-hm7WiSvjBFqnQT07y2WkuGQbwbNO_Nc48xVMauzfDNriwu_Sy5BaifuBcxqr3SnFmj0w4meZIMfr" />
- </picture>
-</a>
+## 致谢
+本项目基于同济大学 SuperPower 战队开源项目 [sp_vision_25](https://github.com/TongjiSuperPower/sp_vision_25) 二次开发，感谢上游团队的开源贡献。
