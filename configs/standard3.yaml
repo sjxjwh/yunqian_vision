@@ -5,10 +5,12 @@ enemy_color: "red"
 yolo_name: yolov5
 classify_model: assets/tiny_resnet.onnx
 yolo11_model_path: assets/yolo11.xml
+trt_engine_path: assets/yolov5_nms.fp16.engine   # 带官方 EfficientNMS_TRT（旧的无 NMS 版：assets/yolov5.fp16.engine）
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
-device: GPU
-min_confidence: 0.8
+device: CPU
+min_confidence: 0.65
+vote_frames: 5            # 识别平滑：最近 N 帧多数票（0=关闭）
 use_traditional: true
 
 #####-----ROI-----#####
@@ -35,15 +37,17 @@ max_rectangular_error: 25 # degree
 min_detect_count: 5
 max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
+use_uvl_ekf: true         # 图像平面 UVL+深度差 多观测联合更新与图像空间匹配（false=旧 YPDA）
+use_focus_roi: true       # 基于整车状态先验的动态聚焦 ROI（丢帧自动扩回全图）
 
 #####-----aimer参数-----#####
-yaw_offset: 2 # degree -2.5
-pitch_offset: 6.5 # degree 2
+yaw_offset: 0.0 # degree（新车联调先清零，原旧车值为 2）
+pitch_offset: 0.0 # degree（新车联调先清零，原旧车值为 6.5）
 comming_angle: 55 # degree
 leaving_angle: 20 # degree
 decision_speed: 7 # rad/s
-high_speed_delay_time: 0.0 # s
-low_speed_delay_time: 0.0 # s planner use this value
+high_speed_delay_time: 0.020 # s (开启速度/加速度前馈后实测零相位点，0.060s 超前约 40ms)
+low_speed_delay_time: 0.020  # s planner use this value
 
 #####-----shooter参数-----#####
 first_tolerance: 3 # 近距离射击容差，degree
@@ -52,7 +56,8 @@ judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
-exposure_ms: 2.5
+exposure_ms: 4.0
+frame_rate: 100           # 相机出图上限（对齐 MPC 100 Hz，2~3 转/秒工况零丢帧且省 CPU/发热）
 gain: 16.9
 vid_pid: "2bdf:0001"
 
@@ -61,15 +66,13 @@ vid_pid: "2bdf:0001"
 #  0  0  1
 R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
-# 重投影误差: 0.1820px
-camera_matrix: [1785.4881526822305, 0, 672.4806478241826, 0, 1785.026019470562, 559.89603224794314, 0, 0, 1]
-distort_coeffs: [-0.076005079619881746, 0.11182817466388446, 0.0005362204787722057, -0.0027546300984895122, 0]
+# 实机无损 PNG ChArUco (14x9, 5x5) 内参标定（6 姿态 439 角点，CALIB_FIX_K3 RMSE=0.647 px）
+camera_matrix: [1809.070395, 0.0, 710.860123, 0.0, 1806.340519, 533.309165, 0.0, 0.0, 1.0]
+distort_coeffs: [-0.05226311, -0.06683318, -0.00312159, 0.00145638, 0.0]
 
-# 相机同理想情况的偏角: yaw1.44 pitch-7.28 roll0.96 degree
-# 标定板到世界坐标系原点的水平距离: 1.13 m
-# 标定板同竖直摆放时的偏角: yaw7.61 pitch13.92 roll-0.46 degree
-R_camera2gimbal: [-0.027182119030230909, -0.12616154330853446, 0.99163723074269183, -0.99949106557517331, 0.019998323121329122, -0.024853106601381177, -0.016695575474690555, -0.99180811252093692, -0.12664093215554434]
-t_camera2gimbal: [0.13160669975045827, 0.10377721766577375, 0.024908271912914642]
+# 理想水平安装矩阵（消除旧车 -7.28° 低头外参干扰；装车后由手眼标定/URDF 替换）
+R_camera2gimbal: [0, 0, 1, -1, 0, 0, 0, -1, 0]
+t_camera2gimbal: [0.0, 0.0, 0.0]
 
 #####-----cboard参数-----#####
 quaternion_canid: 0x100
@@ -78,22 +81,44 @@ send_canid: 0xff
 can_interface: "can0"
 
 #####-----gimbal参数-----#####
-com_port: "/dev/gimbal"
+com_port: "/dev/ttyACM0"
+pitch_up_positive: true   # 串口协议 pitch 向上（抬头）为正，内部自动转换为视觉右手系
+pitch_min_deg: -20.0      # Pitch 机械下限 (deg，低头)
+pitch_max_deg: 30.0       # Pitch 机械上限 (deg，抬头)
+# 下位机四元数 q 表示 imubody->world(Z朝上)，实测 IMU 相对云台滚转 +90°（Y_imu=Z_gimbal, Z_imu=-Y_gimbal）
+# 右乘 R_gimbal2imu 修正为标准云台系 gimbal->world（X前 Y左 Z上，roll≈0°）
+R_gimbal2imu: [1, 0, 0, 0, 0, 1, 0, -1, 0]
+# 当前下位机 IMU 零漂且与编码器存在偏置，yaw/pitch 来自编码器；开启后由 yaw/pitch 直接构造四元数
+use_euler_q: true
+camera_latency_ms: 8.0    # 实测 8ms 远稳于 0ms（0ms 会引发云台-EKF 耦合发散）
+zero_vel_ff: false        # 开启下发速度/加速度前馈（yaw_vel/yaw_acc/pitch_vel/pitch_acc）
 yaw_kp: 0
 yaw_kd: 0
 pitch_kp: 0
 pitch_kd: 0
 
 #####-----planner-----#####
+air_k: 0.02043            # 17mm 弹丸二维耦合二次空气阻力系数 (m^-1)
 fire_thresh: 0.0035
+fire_margin: 0.70         # 3D 弹道-装甲面有效命中核心比例（兼顾 >90% 命中率与最长连续开火区间）
+max_fire_angle: 60        # degree，允许开火的最大 3D 入射角
 
-max_yaw_acc: 50
-Q_yaw: [9e6, 0]
+max_yaw_acc: 120.0        # rad/s^2 (实测 274.8 rad/s^2 安全裕度)
+Q_yaw: [2.5e7, 0]
 R_yaw: [1]
+# 实车辨识: wn=35.54, zeta=0.517 (R^2=0.9475)；与速度前馈叠加会放大过冲，先置 0
+gimbal_yaw_wn: 0.0
+gimbal_yaw_zeta: 0.517
+Q_yaw_plant: [40.0, 0.08] # 传递函数 MPC 权重（加轻微速度阻尼抑制换板过冲）
+R_yaw_plant: [2.5]        # 惩罚换板瞬间激进预超调
+max_yaw_cmd_offset: 0.14  # rad (~8°)，限制单步指令相对偏移，防止过冲甩头
 
-max_pitch_acc: 100
+max_pitch_acc: 88.4       # rad/s^2 (实测 110.5 rad/s^2 的 80% 安全裕度)
 Q_pitch: [9e6, 0]
 R_pitch: [1]
+# 实车辨识: wn=47.36, zeta=0.909 (R^2=0.9911)；同上先置 0
+gimbal_pitch_wn: 0.0
+gimbal_pitch_zeta: 0.909
 
 #####-----buff_detector参数-----#####
 model: "assets/yolo11_buff_int8.xml"

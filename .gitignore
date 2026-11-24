@@ -1,6 +1,7 @@
 .vscode/
 .github/
 build/
+.deps/
 Camera/
 logs/
 assets/img_with_q/
@@ -13,3 +14,9 @@ testvideos/
 watchdog.sh
 records_24/
 records_25/
+*.engine
+.rust/
+.sim/
+.sys/
+__pycache__/
+*.pyc

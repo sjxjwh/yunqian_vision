@@ -23,7 +23,9 @@ Camera::Camera(const std::string & config_path)
   else if (camera_name == "hikrobot") {
     auto gain = tools::read<double>(yaml, "gain");
     auto vid_pid = tools::read<std::string>(yaml, "vid_pid");
-    camera_ = std::make_unique<HikRobot>(exposure_ms, gain, vid_pid);
+    // 可选：相机出图帧率上限，不写默认 150
+    auto frame_rate = yaml["frame_rate"] ? yaml["frame_rate"].as<double>() : 150.0;
+    camera_ = std::make_unique<HikRobot>(exposure_ms, gain, vid_pid, frame_rate);
   }
 
   else {

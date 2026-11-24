@@ -5,6 +5,9 @@
 
 #include <filesystem>
 
+#ifdef SP_WITH_CUDA_PREPROCESS
+#include "cuda_preprocess.hpp"
+#endif
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 
@@ -30,6 +33,36 @@ YOLO11::YOLO11(const std::string & config_path, bool debug)
 
   save_path_ = "imgs";
   std::filesystem::create_directory(save_path_);
+
+  use_cuda_ = yaml["use_cuda_preprocess"] ? yaml["use_cuda_preprocess"].as<bool>() : true;
+  profile_ = yaml["profile"] ? yaml["profile"].as<bool>() : false;
+#ifdef SP_WITH_CUDA_PREPROCESS
+  tools::logger()->info(
+    "preprocess: cuda={} (编译已启用, 设备可用={}), profile={}", use_cuda_,
+    auto_aim::cuda_ops::available(), profile_);
+#else
+  tools::logger()->info("preprocess: cpu (未编译 CUDA), profile={}", profile_);
+#endif
+
+  // 可选：用 TensorRT engine 推理（Jetson 上更快）
+  auto trt_path = yaml["trt_engine_path"] ? yaml["trt_engine_path"].as<std::string>() : "";
+  if (!trt_path.empty()) {
+#ifdef SP_WITH_TENSORRT
+    if (!std::filesystem::exists(trt_path)) {
+      tools::logger()->warn("trt_engine_path 不存在: {}，回退 OpenVINO", trt_path);
+    } else {
+      trt_ = std::make_unique<TrtEngine>(trt_path);
+      tools::logger()->info("YOLO11 使用 TensorRT 推理: {}", trt_path);
+    }
+#else
+    tools::logger()->warn("编译时未启用 TensorRT，忽略 trt_engine_path，回退 OpenVINO");
+#endif
+  }
+
+#ifdef SP_WITH_TENSORRT
+  if (trt_) return;  // TensorRT 路径不需要 OpenVINO
+#endif
+
   auto model = core_.read_model(model_path_);
   ov::preprocess::PrePostProcessor ppp(model);
   auto & input = ppp.input();
@@ -47,10 +80,22 @@ YOLO11::YOLO11(const std::string & config_path, bool debug)
     .convert_color(ov::preprocess::ColorFormat::RGB)
     .scale(255.0);
 
-  // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
   model = ppp.build();
-  compiled_model_ = core_.compile_model(
-    model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  ov::AnyMap ov_props;
+  ov_props[ov::hint::performance_mode.name()] = ov::hint::PerformanceMode::LATENCY;
+  if (device_ == "CPU") {
+    ov_props[ov::hint::scheduling_core_type.name()] = ov::hint::SchedulingCoreType::PCORE_ONLY;
+    if (yaml["ov_num_threads"]) {
+      ov_props[ov::inference_num_threads.name()] = yaml["ov_num_threads"].as<int>();
+    }
+  }
+  try {
+    compiled_model_ = core_.compile_model(model, device_, ov_props);
+  } catch (const std::exception &) {
+    compiled_model_ = core_.compile_model(
+      model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  }
+  infer_request_ = compiled_model_.create_infer_request();
 }
 
 std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
@@ -80,19 +125,56 @@ std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
   auto h = static_cast<int>(bgr_img.rows * scale);
   auto w = static_cast<int>(bgr_img.cols * scale);
 
-  // preproces
+
+#if defined(SP_WITH_TENSORRT) && defined(SP_WITH_CUDA_PREPROCESS)
+  if (trt_ && use_cuda_ && cuda_ops::available()) {
+    const auto t0 = std::chrono::steady_clock::now();
+    cuda_ops::letterbox_to_chw(bgr_img, trt_->input_device_ptr(), 640, 640, trt_->stream());
+    if (profile_) cudaStreamSynchronize(trt_->stream());  // 仅测量用：把预处理和推理分开计时
+    std::vector<float> out;
+    const auto t1 = std::chrono::steady_clock::now();
+    trt_->infer_from_device(out);
+    const auto t2 = std::chrono::steady_clock::now();
+
+    auto & shape = trt_->output_shape();
+    cv::Mat output(shape[1], shape[2], CV_32F, out.data());
+    auto armors = parse(scale, output, raw_img, frame_count);
+    const auto t3 = std::chrono::steady_clock::now();
+
+    if (profile_) profile_report(t0, t1, t2, t3);
+    return armors;
+  }
+#endif
+
+  // CPU letterbox：只有 CPU-TensorRT / OpenVINO 路径用得到（CUDA 路径在 GPU 上做，这里以前白算一遍）
   auto input = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
   auto roi = cv::Rect(0, 0, w, h);
   cv::resize(bgr_img, input(roi), {w, h});
+
+#ifdef SP_WITH_TENSORRT
+  if (trt_) {
+    // BGR u8 -> RGB float32 NCHW / 255（直接写进复用缓冲区，省掉 blobFromImage 的额外拷贝）
+    if (trt_input_.empty()) trt_input_.resize(static_cast<size_t>(3) * 640 * 640);
+    bgr_to_rgb_chw(input, trt_input_.data());
+
+    std::vector<float> out;
+    trt_->infer(trt_input_.data(), trt_input_.size(), out);
+
+    auto & shape = trt_->output_shape();
+    cv::Mat output(shape[1], shape[2], CV_32F, out.data());
+    auto armors = parse(scale, output, raw_img, frame_count);
+    return armors;
+  }
+#endif
+
   ov::Tensor input_tensor(ov::element::u8, {1, 640, 640, 3}, input.data);
 
   /// infer
-  auto infer_request = compiled_model_.create_infer_request();
-  infer_request.set_input_tensor(input_tensor);
-  infer_request.infer();
+  infer_request_.set_input_tensor(input_tensor);
+  infer_request_.infer();
 
   // postprocess
-  auto output_tensor = infer_request.get_output_tensor();
+  auto output_tensor = infer_request_.get_output_tensor();
   auto output_shape = output_tensor.get_shape();
   cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
 
@@ -260,6 +342,26 @@ void YOLO11::save(const Armor & armor) const
   auto file_name = fmt::format("{:%Y-%m-%d_%H-%M-%S}", std::chrono::system_clock::now());
   auto img_path = fmt::format("{}/{}_{}.jpg", save_path_, armor.name, file_name);
   cv::imwrite(img_path, tmp_img_);
+}
+
+void YOLO11::profile_report(
+  std::chrono::steady_clock::time_point t0, std::chrono::steady_clock::time_point t1,
+  std::chrono::steady_clock::time_point t2, std::chrono::steady_clock::time_point t3)
+{
+  auto ms = [](auto a, auto b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  profile_pre_ += ms(t0, t1);
+  profile_infer_ += ms(t1, t2);
+  profile_parse_ += ms(t2, t3);
+  if (++profile_count_ % 50 != 0) return;
+  tools::logger()->info(
+    "[profile] preprocess {:.2f} ms | infer {:.2f} ms | parse {:.2f} ms | total {:.2f} ms",
+    profile_pre_ / profile_count_, profile_infer_ / profile_count_,
+    profile_parse_ / profile_count_,
+    (profile_pre_ + profile_infer_ + profile_parse_) / profile_count_);
+  profile_pre_ = profile_infer_ = profile_parse_ = 0;
+  profile_count_ = 0;
 }
 
 std::list<Armor> YOLO11::postprocess(

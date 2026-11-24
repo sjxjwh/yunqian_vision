@@ -104,7 +104,8 @@ struct Armor
   Eigen::Vector3d ypr_in_world;   // 单位：rad
   Eigen::Vector3d ypd_in_world;   // 球坐标系
 
-  double yaw_raw;  // rad
+  double yaw_raw;        // rad，PnP 原始 yaw，会被 yaw 优化覆盖
+  double lightbar_yaw;  // rad，两灯条中点连线的世界系 yaw，侧面时比 PnP yaw 稳
 
   Armor(const Lightbar & left, const Lightbar & right);
   Armor(

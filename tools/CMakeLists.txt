@@ -7,6 +7,9 @@ add_library(tools OBJECT
     img_tools.cpp
     math_tools.cpp
     plotter.cpp
+    web_viewer.cpp
+    sim_metrics.cpp
+    gimbal_csv_logger.cpp
     trajectory.cpp
     recorder.cpp
     logger.cpp

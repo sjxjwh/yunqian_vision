@@ -7,6 +7,7 @@
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/trajectory.hpp"
 
 namespace auto_aim
@@ -15,8 +16,9 @@ Aimer::Aimer(const std::string & config_path)
 : left_yaw_offset_(std::nullopt), right_yaw_offset_(std::nullopt)
 {
   auto yaml = YAML::LoadFile(config_path);
-  yaw_offset_ = yaml["yaw_offset"].as<double>() / 57.3;        // degree to rad
-  pitch_offset_ = yaml["pitch_offset"].as<double>() / 57.3;    // degree to rad
+  yaw_offset_.store(yaml["yaw_offset"].as<double>() / 57.3, std::memory_order_relaxed);      // degree to rad
+  pitch_offset_.store(yaml["pitch_offset"].as<double>() / 57.3, std::memory_order_relaxed);  // degree to rad
+  if (yaml["air_k"]) air_k_ = yaml["air_k"].as<double>();
   comming_angle_ = yaml["comming_angle"].as<double>() / 57.3;  // degree to rad
   leaving_angle_ = yaml["leaving_angle"].as<double>() / 57.3;  // degree to rad
   high_speed_delay_time_ = yaml["high_speed_delay_time"].as<double>();
@@ -27,6 +29,18 @@ Aimer::Aimer(const std::string & config_path)
     right_yaw_offset_ = yaml["right_yaw_offset"].as<double>() / 57.3;  // degree to rad
     tools::logger()->info("[Aimer] successfully loading shootmode");
   }
+
+  constexpr double R2D = 180.0 / M_PI;
+  constexpr double D2R = M_PI / 180.0;
+  auto & rp = tools::RuntimeParams::instance();
+  rp.add(
+    "aimer.yaw_offset", "Aimer 偏航零偏 (deg)", -15.0, 15.0,
+    [this] { return yaw_offset_.load(std::memory_order_relaxed) * R2D; },
+    [this](double v) { yaw_offset_.store(v * D2R, std::memory_order_relaxed); }, "yaw_offset");
+  rp.add(
+    "aimer.pitch_offset", "Aimer 俯仰零偏 (deg)", -15.0, 15.0,
+    [this] { return pitch_offset_.load(std::memory_order_relaxed) * R2D; },
+    [this](double v) { pitch_offset_.store(v * D2R, std::memory_order_relaxed); }, "pitch_offset");
 }
 
 io::Command Aimer::aim(
@@ -38,7 +52,7 @@ io::Command Aimer::aim(
 
   auto ekf = target.ekf();
   double delay_time =
-    target.ekf_x()[7] > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
+    std::abs(target.ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
 
   if (bullet_speed < 14) bullet_speed = 23;
 
@@ -67,7 +81,7 @@ io::Command Aimer::aim(
 
   Eigen::Vector3d xyz0 = aim_point0.xyza.head(3);
   auto d0 = std::sqrt(xyz0[0] * xyz0[0] + xyz0[1] * xyz0[1]);
-  tools::Trajectory trajectory0(bullet_speed, d0, xyz0[2]);
+  tools::Trajectory trajectory0(bullet_speed, d0, xyz0[2], air_k_);
   if (trajectory0.unsolvable) {
     tools::logger()->debug(
       "[Aimer] Unsolvable trajectory0: {:.2f} {:.2f} {:.2f}", bullet_speed, d0, xyz0[2]);
@@ -96,7 +110,7 @@ io::Command Aimer::aim(
     // 计算新弹道
     Eigen::Vector3d xyz = aim_point.xyza.head(3);
     double d = std::sqrt(xyz.x() * xyz.x() + xyz.y() * xyz.y());
-    current_traj = tools::Trajectory(bullet_speed, d, xyz.z());
+    current_traj = tools::Trajectory(bullet_speed, d, xyz.z(), air_k_);
 
     // 检查弹道是否可解
     if (current_traj.unsolvable) {
@@ -117,8 +131,8 @@ io::Command Aimer::aim(
 
   // 计算最终角度
   Eigen::Vector3d final_xyz = debug_aim_point.xyza.head(3);
-  double yaw = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_;
-  double pitch = -(current_traj.pitch + pitch_offset_);  //世界坐标系下pitch向上为负
+  double yaw = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_.load(std::memory_order_relaxed);
+  double pitch = -(current_traj.pitch + pitch_offset_.load(std::memory_order_relaxed));  //世界坐标系下pitch向上为负
   return {true, false, yaw, pitch};
 }
 
@@ -126,17 +140,18 @@ io::Command Aimer::aim(
   std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
   io::ShootMode shoot_mode, bool to_now)
 {
+  const double base_yaw_offset = yaw_offset_.load(std::memory_order_relaxed);
   double yaw_offset;
   if (shoot_mode == io::left_shoot && left_yaw_offset_.has_value()) {
     yaw_offset = left_yaw_offset_.value();
   } else if (shoot_mode == io::right_shoot && right_yaw_offset_.has_value()) {
     yaw_offset = right_yaw_offset_.value();
   } else {
-    yaw_offset = yaw_offset_;
+    yaw_offset = base_yaw_offset;
   }
 
   auto command = aim(targets, timestamp, bullet_speed, to_now);
-  command.yaw = command.yaw - yaw_offset_ + yaw_offset;
+  command.yaw = command.yaw - base_yaw_offset + yaw_offset;
 
   return command;
 }
@@ -160,7 +175,7 @@ AimPoint Aimer::choose_aim_point(const Target & target)
   }
 
   // 不考虑小陀螺
-  if (std::abs(target.ekf_x()[8]) <= 2 && target.name != ArmorName::outpost) {
+  if (std::abs(target.ekf_x()[7]) <= 2 && target.name != ArmorName::outpost) {
     // 选择在可射击范围内的装甲板
     std::vector<int> id_list;
     for (int i = 0; i < armor_num; i++) {

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake")
+if(NOT OpenVINO_DIR)
+  set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake")
+endif()
 
 find_package(OpenVINO REQUIRED)
 find_package(Ceres REQUIRED)
@@ -13,4 +15,4 @@ add_library(auto_buff OBJECT
     yolo11_buff.cpp
 )
 
-target_link_libraries(auto_buff auto_aim openvino::runtime ${CERES_LIBRARIES})
+target_link_libraries(auto_buff auto_aim serial openvino::runtime ${CERES_LIBRARIES})

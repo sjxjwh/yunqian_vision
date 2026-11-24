@@ -52,10 +52,22 @@ YOLOV8::YOLOV8(const std::string & config_path, bool debug)
     .convert_color(ov::preprocess::ColorFormat::RGB)
     .scale(255.0);
 
-  // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
   model = ppp.build();
-  compiled_model_ = core_.compile_model(
-    model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  ov::AnyMap ov_props;
+  ov_props[ov::hint::performance_mode.name()] = ov::hint::PerformanceMode::LATENCY;
+  if (device_ == "CPU") {
+    ov_props[ov::hint::scheduling_core_type.name()] = ov::hint::SchedulingCoreType::PCORE_ONLY;
+    if (yaml["ov_num_threads"]) {
+      ov_props[ov::inference_num_threads.name()] = yaml["ov_num_threads"].as<int>();
+    }
+  }
+  try {
+    compiled_model_ = core_.compile_model(model, device_, ov_props);
+  } catch (const std::exception &) {
+    compiled_model_ = core_.compile_model(
+      model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  }
+  infer_request_ = compiled_model_.create_infer_request();
 }
 
 std::list<Armor> YOLOV8::detect(const cv::Mat & raw_img, int frame_count)
@@ -91,12 +103,11 @@ std::list<Armor> YOLOV8::detect(const cv::Mat & raw_img, int frame_count)
   ov::Tensor input_tensor(ov::element::u8, {1, 416, 416, 3}, input.data);
 
   /// infer
-  auto infer_request = compiled_model_.create_infer_request();
-  infer_request.set_input_tensor(input_tensor);
-  infer_request.infer();
+  infer_request_.set_input_tensor(input_tensor);
+  infer_request_.infer();
 
   // postprocess
-  auto output_tensor = infer_request.get_output_tensor();
+  auto output_tensor = infer_request_.get_output_tensor();
   auto output_shape = output_tensor.get_shape();
   cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
 

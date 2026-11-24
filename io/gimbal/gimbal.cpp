@@ -1,5 +1,8 @@
 #include "gimbal.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include "tools/crc.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -11,6 +14,37 @@ Gimbal::Gimbal(const std::string & config_path)
 {
   auto yaml = tools::load(config_path);
   auto com_port = tools::read<std::string>(yaml, "com_port");
+  const bool pitch_up_positive =
+    yaml["pitch_up_positive"] ? yaml["pitch_up_positive"].as<bool>() : true;
+  pitch_sign_ = pitch_up_positive ? -1.0 : 1.0;
+  if (yaml["pitch_min_deg"]) {
+    pitch_min_rad_ = static_cast<float>(yaml["pitch_min_deg"].as<double>() * M_PI / 180.0);
+  }
+  if (yaml["pitch_max_deg"]) {
+    pitch_max_rad_ = static_cast<float>(yaml["pitch_max_deg"].as<double>() * M_PI / 180.0);
+  }
+  if (yaml["R_gimbal2imu"] && yaml["R_gimbal2imu"].size() == 9) {
+    auto data = yaml["R_gimbal2imu"].as<std::vector<double>>();
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R(data.data());
+    q_gimbal2imu_ = Eigen::Quaterniond(R).normalized();
+    tools::logger()->info("[Gimbal] 已启用 R_gimbal2imu 四元数安装角修正 (right-multiply)");
+  }
+  use_euler_q_ = yaml["use_euler_q"] ? yaml["use_euler_q"].as<bool>() : false;
+  if (use_euler_q_) {
+    tools::logger()->info("[Gimbal] 已启用 use_euler_q：由串口 yaw/pitch 直接构造姿态四元数（忽略 IMU 四元数）");
+  }
+  camera_latency_ms_ =
+    yaml["camera_latency_ms"] ? yaml["camera_latency_ms"].as<double>() : 0.0;
+  zero_vel_ff_ = yaml["zero_vel_ff"] ? yaml["zero_vel_ff"].as<bool>() : false;
+  if (camera_latency_ms_ != 0.0 || zero_vel_ff_) {
+    tools::logger()->info(
+      "[Gimbal] 延迟补偿 camera_latency_ms={:.1f} ms | 速度前馈清零 zero_vel_ff={}",
+      camera_latency_ms_, zero_vel_ff_);
+  }
+  tools::logger()->info(
+    "[Gimbal] 串口 pitch 约定: {} | 软限位 [{:.1f}°, {:.1f}°]",
+    pitch_up_positive ? "抬头为正" : "低头为正", pitch_min_rad_ * 180.0 / M_PI,
+    pitch_max_rad_ * 180.0 / M_PI);
 
   try {
     serial_.setPort(com_port);
@@ -63,29 +97,31 @@ std::string Gimbal::str(GimbalMode mode) const
 
 Eigen::Quaterniond Gimbal::q(std::chrono::steady_clock::time_point t)
 {
+  const auto t_query =
+    t - std::chrono::microseconds(static_cast<int64_t>(std::llround(camera_latency_ms_ * 1000.0)));
   while (true) {
     auto [q_a, t_a] = queue_.pop();
     auto [q_b, t_b] = queue_.front();
+    if (t_query <= t_a) return q_a.normalized();
     auto t_ab = tools::delta_time(t_a, t_b);
-    auto t_ac = tools::delta_time(t_a, t);
-    auto k = t_ac / t_ab;
-    Eigen::Quaterniond q_c = q_a.slerp(k, q_b).normalized();
-    if (t < t_a) return q_c;
-    if (!(t_a < t && t <= t_b)) continue;
-
-    return q_c;
+    auto t_ac = tools::delta_time(t_a, t_query);
+    if (t_query <= t_b) {
+      auto k = (t_ab > 1e-9) ? std::clamp(t_ac / t_ab, 0.0, 1.0) : 0.0;
+      return q_a.slerp(k, q_b).normalized();
+    }
   }
 }
 
 void Gimbal::send(io::VisionToGimbal VisionToGimbal)
 {
+  const float p_sign = static_cast<float>(pitch_sign_);
   tx_data_.mode = VisionToGimbal.mode;
   tx_data_.yaw = VisionToGimbal.yaw;
-  tx_data_.yaw_vel = VisionToGimbal.yaw_vel;
-  tx_data_.yaw_acc = VisionToGimbal.yaw_acc;
-  tx_data_.pitch = VisionToGimbal.pitch;
-  tx_data_.pitch_vel = VisionToGimbal.pitch_vel;
-  tx_data_.pitch_acc = VisionToGimbal.pitch_acc;
+  tx_data_.yaw_vel = zero_vel_ff_ ? 0.0f : VisionToGimbal.yaw_vel;
+  tx_data_.yaw_acc = zero_vel_ff_ ? 0.0f : VisionToGimbal.yaw_acc;
+  tx_data_.pitch = std::clamp(VisionToGimbal.pitch * p_sign, pitch_min_rad_, pitch_max_rad_);
+  tx_data_.pitch_vel = zero_vel_ff_ ? 0.0f : VisionToGimbal.pitch_vel * p_sign;
+  tx_data_.pitch_acc = zero_vel_ff_ ? 0.0f : VisionToGimbal.pitch_acc * p_sign;
   tx_data_.crc16 = tools::get_crc16(
     reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
 
@@ -100,13 +136,14 @@ void Gimbal::send(
   bool control, bool fire, float yaw, float yaw_vel, float yaw_acc, float pitch, float pitch_vel,
   float pitch_acc)
 {
+  const float p_sign = static_cast<float>(pitch_sign_);
   tx_data_.mode = control ? (fire ? 2 : 1) : 0;
   tx_data_.yaw = yaw;
-  tx_data_.yaw_vel = yaw_vel;
-  tx_data_.yaw_acc = yaw_acc;
-  tx_data_.pitch = pitch;
-  tx_data_.pitch_vel = pitch_vel;
-  tx_data_.pitch_acc = pitch_acc;
+  tx_data_.yaw_vel = zero_vel_ff_ ? 0.0f : yaw_vel;
+  tx_data_.yaw_acc = zero_vel_ff_ ? 0.0f : yaw_acc;
+  tx_data_.pitch = std::clamp(pitch * p_sign, pitch_min_rad_, pitch_max_rad_);
+  tx_data_.pitch_vel = zero_vel_ff_ ? 0.0f : pitch_vel * p_sign;
+  tx_data_.pitch_acc = zero_vel_ff_ ? 0.0f : pitch_acc * p_sign;
   tx_data_.crc16 = tools::get_crc16(
     reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
 
@@ -162,15 +199,27 @@ void Gimbal::read_thread()
     }
 
     error_count = 0;
-    Eigen::Quaterniond q(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]);
+    const double yaw_rad = static_cast<double>(rx_data_.yaw);
+    const double pitch_vis = static_cast<double>(rx_data_.pitch) * pitch_sign_;
+    Eigen::Quaterniond q =
+      use_euler_q_
+        ? Eigen::Quaterniond(
+            Eigen::AngleAxisd(yaw_rad, Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(pitch_vis, Eigen::Vector3d::UnitY()))
+            .normalized()
+        : (Eigen::Quaterniond(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]) *
+           q_gimbal2imu_)
+            .normalized();
     queue_.push({q, t});
 
     std::lock_guard<std::mutex> lock(mutex_);
 
+    const float p_sign = static_cast<float>(pitch_sign_);
     state_.yaw = rx_data_.yaw;
     state_.yaw_vel = rx_data_.yaw_vel;
-    state_.pitch = rx_data_.pitch;
-    state_.pitch_vel = rx_data_.pitch_vel;
+    state_.pitch = rx_data_.pitch * p_sign;
+    state_.pitch_vel = rx_data_.pitch_vel * p_sign;
+    state_.roll = use_euler_q_ ? 0.0f : static_cast<float>(tools::eulers(q, 2, 1, 0)[2]);
     state_.bullet_speed = rx_data_.bullet_speed;
     state_.bullet_count = rx_data_.bullet_count;
 

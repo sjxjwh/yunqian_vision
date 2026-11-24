@@ -3,16 +3,33 @@
 #include <libusb-1.0/libusb.h>
 
 #include "tools/logger.hpp"
+#include "tools/runtime_params.hpp"
 
 using namespace std::chrono_literals;
 
 namespace io
 {
-HikRobot::HikRobot(double exposure_ms, double gain, const std::string & vid_pid)
-: exposure_us_(exposure_ms * 1e3), gain_(gain), queue_(1), daemon_quit_(false), vid_(-1), pid_(-1)
+HikRobot::HikRobot(
+  double exposure_ms, double gain, const std::string & vid_pid, double frame_rate)
+: exposure_us_(exposure_ms * 1e3),
+  gain_(gain),
+  frame_rate_(frame_rate),
+  queue_(1),
+  daemon_quit_(false),
+  vid_(-1),
+  pid_(-1)
 {
   set_vid_pid(vid_pid);
   if (libusb_init(NULL)) tools::logger()->warn("Unable to init libusb!");
+
+  // 注册运行期可调参数（网页 / 调试工具可改）
+  auto & rp = tools::RuntimeParams::instance();
+  rp.add("camera.exposure_ms", "曝光 (ms)", 0.1, 30.0, [this] { return exposure_us_ / 1e3; },
+         [this](double v) { set_exposure_ms(v); }, "exposure_ms");
+  rp.add("camera.gain", "增益", 0.0, 20.0, [this] { return gain_; },
+         [this](double v) { set_gain(v); }, "gain");
+  rp.add("camera.frame_rate", "相机出图帧率上限", 10.0, 250.0, [this] { return frame_rate_; },
+         [this](double v) { set_frame_rate(v); }, "frame_rate");
 
   daemon_thread_ = std::thread{[this] {
     tools::logger()->info("HikRobot's daemon thread started.");
@@ -51,6 +68,30 @@ void HikRobot::read(cv::Mat & img, std::chrono::steady_clock::time_point & times
   timestamp = data.timestamp;
 }
 
+void HikRobot::set_exposure_ms(double ms)
+{
+  exposure_us_ = ms * 1e3;
+  if (!handle_) return;
+  auto ret = MV_CC_SetFloatValue(handle_, "ExposureTime", exposure_us_);
+  if (ret != MV_OK) tools::logger()->warn("设置曝光失败: {:#x}", ret);
+}
+
+void HikRobot::set_gain(double g)
+{
+  gain_ = g;
+  if (!handle_) return;
+  auto ret = MV_CC_SetFloatValue(handle_, "Gain", gain_);
+  if (ret != MV_OK) tools::logger()->warn("设置增益失败: {:#x}", ret);
+}
+
+void HikRobot::set_frame_rate(double fps)
+{
+  frame_rate_ = fps;
+  if (!handle_) return;
+  auto ret = MV_CC_SetFrameRate(handle_, static_cast<float>(frame_rate_));
+  if (ret != MV_OK) tools::logger()->warn("设置帧率失败: {:#x}", ret);
+}
+
 void HikRobot::capture_start()
 {
   capturing_ = false;
@@ -87,7 +128,7 @@ void HikRobot::capture_start()
   set_enum_value("GainAuto", MV_GAIN_MODE_OFF);
   set_float_value("ExposureTime", exposure_us_);
   set_float_value("Gain", gain_);
-  MV_CC_SetFrameRate(handle_, 150);
+  MV_CC_SetFrameRate(handle_, static_cast<float>(frame_rate_));  // 出图帧率上限（yaml: frame_rate）
 
   ret = MV_CC_StartGrabbing(handle_);
   if (ret != MV_OK) {

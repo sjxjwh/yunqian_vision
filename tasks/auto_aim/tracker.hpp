@@ -23,15 +23,22 @@ public:
 
   std::list<Target> track(
     std::list<Armor> & armors, std::chrono::steady_clock::time_point t,
-    bool use_enemy_color = true);
+    bool use_enemy_color = true, const Eigen::Vector3d & self_vel = Eigen::Vector3d::Zero());
 
   std::tuple<omniperception::DetectionResult, std::list<Target>> track(
     const std::vector<omniperception::DetectionResult> & detection_queue, std::list<Armor> & armors,
     std::chrono::steady_clock::time_point t, bool use_enemy_color = true);
 
+  // 基于当前整车跟踪状态返回网络聚焦 ROI（未收敛/丢失时返回全图）
+  cv::Rect focus_roi(
+    const cv::Size & img_size, std::chrono::steady_clock::time_point now,
+    const Eigen::Vector3d & self_vel = Eigen::Vector3d::Zero()) const;
+
 private:
   Solver & solver_;
   Color enemy_color_;
+  bool use_uvl_ekf_ = true;
+  bool use_focus_roi_ = true;
   int min_detect_count_;
   int max_temp_lost_count_;
   int detect_count_;
@@ -47,7 +54,9 @@ private:
 
   bool set_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
 
-  bool update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t);
+  bool update_target(
+    std::list<Armor> & armors, std::chrono::steady_clock::time_point t,
+    const Eigen::Vector3d & self_vel = Eigen::Vector3d::Zero());
 };
 
 }  // namespace auto_aim

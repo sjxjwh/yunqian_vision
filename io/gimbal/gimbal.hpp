@@ -59,6 +59,10 @@ struct GimbalState
   float yaw_vel;
   float pitch;
   float pitch_vel;
+  float roll = 0.0f;  // 云台在世界系下的滚转角 (rad，绕前向轴右倾为正)
+  float vx = 0.0f;    // 预留：底盘世界系线速度 (m/s)，待电控协议扩展后填充
+  float vy = 0.0f;
+  float vz = 0.0f;
   float bullet_speed;
   uint16_t bullet_count;
 };
@@ -90,6 +94,25 @@ private:
 
   GimbalToVision rx_data_;
   VisionToGimbal tx_data_;
+
+  // 电控串口 pitch 符号与限位（默认抬头为正，范围 -20° ~ +30°；视觉内部为右手系低头正/抬头负）
+  double pitch_sign_ = -1.0;
+  float pitch_min_rad_ = -20.0f * 3.14159265f / 180.0f;
+  float pitch_max_rad_ = 30.0f * 3.14159265f / 180.0f;
+
+  // 若下位机四元数 q 表示 imubody->world(Z朝上) 且 IMU 芯片相对云台存在固定安装旋转，
+  // 右乘 q_gimbal2imu_ 将其换算为标准云台系 gimbal->world（X前 Y左 Z上）。默认为单位四元数。
+  Eigen::Quaterniond q_gimbal2imu_ = Eigen::Quaterniond::Identity();
+
+  // 当下位机 IMU 不可信、且 yaw/pitch 字段来自编码器时，改为直接用 yaw/pitch 构造四元数（roll=0），
+  // 保证视觉世界系与电控编码器参考系严格一致。
+  bool use_euler_q_ = false;
+
+  // 相机曝光中点到取图时间戳的系统延迟补偿 (ms)，查询姿态时自动前移该时长
+  double camera_latency_ms_ = 0.0;
+
+  // 下发指令时是否将速度/加速度前馈清零（仅发位置，用于排查电控前馈符号或增益问题）
+  bool zero_vel_ff_ = false;
 
   GimbalMode mode_ = GimbalMode::IDLE;
   GimbalState state_;

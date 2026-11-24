@@ -1,5 +1,6 @@
 #include "extended_kalman_filter.hpp"
 
+#include <cmath>
 #include <numeric>
 
 namespace tools
@@ -62,9 +63,15 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
   double nis = residual.transpose() * S.inverse() * residual;
   double nees = (x - x_prior).transpose() * P.inverse() * (x - x_prior);
 
-  // 卡方检验阈值（自由度=4，取置信水平95%）
-  constexpr double nis_threshold = 0.711;
-  constexpr double nees_threshold = 0.711;
+  // NIS 卡方检验，抓残差大得不正常的更新。4 维保持原值 0.711；
+  // 6 维及以上（含 8/9/16 维 UVL 多观测联合更新）按自由度 k 的 χ²(k) 95% 上分位（Wilson–Hilferty 近似）。
+  double nis_threshold = 0.711;
+  if (z.size() >= 6) {
+    const double k = static_cast<double>(z.size());
+    const double t = 1.0 - 2.0 / (9.0 * k) + 1.6448536 * std::sqrt(2.0 / (9.0 * k));
+    nis_threshold = k * t * t * t;
+  }
+  const double nees_threshold = x.size() >= 13 ? 22.362 : 0.711;
 
   if (nis > nis_threshold) nis_count_++, data["nis_fail"] = 1;
   if (nees > nees_threshold) nees_count_++, data["nees_fail"] = 1;

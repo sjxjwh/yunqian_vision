@@ -1,0 +1,206 @@
+# 仿真里我方是红队、敌方是蓝队，打蓝队。
+enemy_color: "blue"
+
+#####-----神经网络参数-----#####
+yolo_name: yolov5
+classify_model: assets/tiny_resnet.onnx
+yolo11_model_path: assets/yolo11.xml
+yolov8_model_path: assets/yolov8.xml
+yolov5_model_path: assets/yolov5.xml
+trt_engine_path: assets/yolov5_rtx4060.engine
+device: CPU
+min_confidence: 0.8
+use_traditional: true
+
+#####-----ROI-----#####
+roi:
+  x: 420
+  y: 50
+  width: 600
+  height: 600
+
+use_roi: false
+
+#####-----传统方法参数-----#####
+# 仿真灯条是纯色发光，纯蓝灰度约 130，实机用的 150 会把它们全部滤掉。
+threshold: 60
+max_angle_error: 45
+min_lightbar_ratio: 1.5
+max_lightbar_ratio: 20
+min_lightbar_length: 8
+min_armor_ratio: 1
+max_armor_ratio: 5
+max_side_ratio: 1.5
+max_rectangular_error: 25
+
+#####-----tracker参数-----#####
+min_detect_count: 5
+max_temp_lost_count: 15
+outpost_max_temp_lost_count: 75
+use_uvl_ekf: true
+use_focus_roi: true
+
+#####-----aimer参数-----#####
+yaw_offset: 0
+pitch_offset: 0
+comming_angle: 55
+leaving_angle: 20
+decision_speed: 7
+# 纯传输延迟 + SimGimbalModel + SHM + daedalus PID(kp=45) 端到端总滞后提前量（实测零相位点 40 ms）
+high_speed_delay_time: 0.040
+low_speed_delay_time: 0.040
+
+#####-----shooter参数-----#####
+first_tolerance: 3
+second_tolerance: 2
+judge_distance: 2
+auto_fire: true
+
+#####-----planner参数-----#####
+use_planner: true
+muzzle_z_offset: 0.097 # m，仿真炮口相对云台原点的高度差
+# 空气阻力系数 k1 = 0.5*rho*Cd*A/m (m^-1)：仿真默认关闭空气阻力用 0.0；
+# 实车 17mm 弹丸约 0.0204，仿真开启 aerodynamics 时按 Cd=0.22516 约 0.0098。
+air_k: 0.0
+fire_thresh: 0.005
+shoot_offset: 2
+fire_margin: 0.85
+max_fire_angle: 55 # degree
+# 真实云台 yaw: 额定3.5Nm/峰值12.5Nm, J=0.0146 kg*m^2 -> 实测有效峰值 114.5 rad/s^2、DM4310 规划上限 210；
+# 100 Hz 闭环实测 180.0 兼顾小陀螺快速换板与无过冲，缩短换板死区拉长开火占空比
+max_yaw_acc: 180.0
+Q_yaw: [2e7, 0]
+R_yaw: [1]
+max_pitch_acc: 100
+Q_pitch: [9e6, 0]
+R_pitch: [1]
+# 设为 0.0 使用平滑 MPC（SimGimbalModel 已含 500 Hz LQI + 速度/加速度前馈，叠加逆模型会双重前馈过冲至 16°）；
+# 100 Hz 端到端辨识参考值（含 SimGimbalModel，R^2>0.984）: yaw tau_d=40ms wn=29.25/zeta=0.632, pitch tau_d=60ms wn=62.10/zeta=1.121
+gimbal_yaw_wn: 0.0
+gimbal_yaw_zeta: 0.632
+gimbal_pitch_wn: 0.0
+gimbal_pitch_zeta: 1.121
+
+#####-----仿真相机-----#####
+# 仿真默认 1440x1080、垂直视场角 45°，由 compute_camera_intrinsics 算出。
+# 与 bevy_robomaster_simulator/config.toml 中 [projectile].speed = 25.0 对齐。
+bullet_speed: 25
+
+# 仿真云台与 IMU 体轴重合，单位阵即可。
+R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+# 仿真发布的 gimbal_quat 并不等于真云台：talos/capture.rs 里额外乘了
+#   SHOT_DIRECTION 的局部旋转 Rx(-65°) 和 Quat::from_euler(ZYX, 0, 0, 90°)。
+# 注意 glam 的 ZYX(0,0,90°) 实际是 Rx(90°)，所以两段合成 Rx(+25°)。
+# 换算到 ROS 后是绕 y 的 -25°（俯仰），即发布值 = 真云台 * Ry(-25°)，
+# 相机/炮口比真云台高 25°。这里右乘它的逆 Ry(+25°) 把世界系转回真云台；
+# 缺省 [1,0,0,0] 表示不修正，实机走 cboard，不读取这一项。
+pose_correction: [0.976296, 0, 0.216440, 0]
+
+# 内参：已切换为三号步兵无损 PNG 标定值（配合下方 sim_camera_model.enabled: true 使用）；
+# 仿真原始针孔内参 [1304.673, 0, 720, 0, 1304.673, 540, 0, 0, 1] 保存在 sim_camera_model.sim_camera_matrix。
+camera_matrix: [1809.070395, 0.0, 710.860123, 0.0, 1806.340519, 533.309165, 0.0, 0.0, 1.0]
+distort_coeffs: [-0.05226311, -0.06683318, -0.00312159, 0.00145638, 0.0]
+
+# 云台修正后，这里要填“相机光学系 -> 真云台系”的旋转，不再是仿真 tf 里的
+# camera_link。仿真相机相对真云台是 Rx(+25°)（炮口 Rx(-65°) 再叠 90° 相机朝向），
+# 相机光学系相对相机本体是 diag(1,-1,-1)，合起来是
+#   A * Rx(25°) * diag(1,-1,-1)
+# A 是 Bevy->ROS 的 M_ALIGN。投影回图像时这块必须和 pose_correction 配套使用。
+R_camera2gimbal: [0, 0.422618, 0.906308, -1, 0, 0, 0, -0.906308, 0.422618]
+# 相机相对真云台的平移，单位米，取自仿真 PoseIndex::Camera（A * camera_rel）。
+# 0.06m 的前向偏移在 1.4m 目标上就是 4% 距离，不能再用零。
+t_camera2gimbal: [0.060025, 0.002017, 0.196342]
+
+#####-----弹道闭环 AimCorrector 参数（对齐仿真 HDR 过曝荧光绿弹丸 H:50~72, S:50+, V:180+）-----#####
+fire_delay: 0.040
+bullet_h_lo: 50
+bullet_h_hi: 72
+bullet_s_min: 50
+bullet_v_min: 180
+corrector_min_range: 0.6
+corrector_gate_px: 70
+corrector_min_samples: 2
+
+#####-----真实相机复现模型（默认关闭，不改只读仿真器）-----#####
+# 启用时：把上方 camera_matrix / distort_coeffs 改为目标实机标定值（或留作带误差的标定值以复现 KI-004），
+# 本段负责把仿真理想针孔图重映射并叠加实机光学/传感器/时序特性。
+sim_camera_model:
+  enabled: true
+  enable_geometry: true
+  # 仿真器原始针孔内参（1440x1080, fov_y=45°）
+  sim_camera_matrix: [1304.673, 0, 720, 0, 1304.673, 540, 0, 0, 1]
+  # 复现目标（三号步兵无损 PNG 6 姿态 ChArUco 标定真值，CALIB_FIX_K3 RMSE=0.647 px）；
+  # 省略时默认取顶层 camera_matrix / distort_coeffs
+  true_camera_matrix: [1809.070395, 0.0, 710.860123, 0.0, 1806.340519, 533.309165, 0.0, 0.0, 1.0]
+  true_distort_coeffs: [-0.05226311, -0.06683318, -0.00312159, 0.00145638, 0.0]
+  # 安装旋转扰动 [roll, pitch, yaw] (deg)，用于模拟手眼旋转外参误差
+  R_perturb_deg: [0.0, 0.0, 0.0]
+
+  # 光学与传感器退化（由 tools/eval_sim_camera_charuco.py 对照三号步兵无损实拍拟合）
+  enable_motion_blur: true
+  exposure_ms: 4.0            # 对齐三号步兵 exposure_ms
+  max_motion_blur_px: 35.0
+  gaussian_blur_sigma: 1.30   # 2m 作战距离实测镜头 MTF 模糊 (px)
+  vignette_strength: 0.12     # 四角暗角衰减比例 [0, 1)
+  brightness_scale: 1.15      # 亮度增益（>1 模拟灯条中心过曝截断）
+  gamma: 1.0                  # out = 255 * (in/255)^gamma
+  black_level_offset: 0.0     # 黑电平偏移 (DN)
+  read_noise_std: 0.26        # 实测读出噪声标准差 (DN)
+  shot_noise_k: 0.0343        # 实测散粒噪声系数（Var = read^2 + shot_k * I）
+
+  # 时序与帧率
+  target_fps: 100.0           # 对齐三号步兵 100 FPS（配合 preview=false 高帧率仿真 + 绝对周期网格稳锁 100.0 Hz）
+  timestamp_offset_ms: -2.0   # 曝光中点偏移 (ms)
+  timestamp_jitter_ms: 0.4    # 时间戳随机抖动标准差 (ms)
+  seed: 0                     # 0=随机，非 0=可复现
+
+#####-----真实云台动力学与控制器复现（对齐 27-wheel-leg-wbc/gimbal @ 7991a95 三号步兵 500Hz LQI+DM4310）-----#####
+sim_gimbal_model:
+  enabled: true
+  control_freq_hz: 500.0      # 对齐 GIMBAL_LQR_CONTROL_FREQ_HZ = 500 Hz
+  use_vel_acc_ff: true        # 对齐最新 gimbal.c 视觉模式：直接接入 yaw_vel_ff / yaw_acc_ff
+  pitch_min_deg: -20.0        # 对齐三号步兵限位（抬头为正）
+  pitch_max_deg: 30.0
+  yaw:
+    inertia_kgm2: 0.0146      # 500 Hz 辨识等效惯量 (kg*m^2)
+    ctrl_inertia_kgm2: 0.0146
+    coulomb_friction_nm: 0.25 # 对齐 GIMBAL_YAW_COULOMB_FF_NM
+    coulomb_smooth_radps: 0.25
+    viscous_damping: 0.042    # 对齐 GIMBAL_YAW_VISCOUS_FF_NM_PER_RADPS
+    torque_lag_tau_s: 0.006   # 内部力矩环一阶滞后 (~6 ms)
+    torque_limit_nm: 6.0      # 对齐 gimbal.c YAW_TORQUE_LIMIT
+    rated_torque_nm: 3.5      # 电机额定扭矩 (N*m)
+    peak_torque_nm: 12.5      # 电机峰值扭矩 (N*m)
+    rated_speed_rpm: 120.0    # 电机额定转速 (rpm)
+    no_load_speed_rpm: 200.0  # 电机空载转速 (rpm)
+    max_vel_ref_radps: 16.5   # 对齐 yaw_reference_config.MaxVelocityRadps
+    max_acc_ref_radps2: 210.0 # 对齐 yaw_reference_config.MaxAccelerationRadps2
+    lqr_gain: [24.00, 0.96, 0.0, 120.00]  # 对齐 gimbal.c 500 Hz LQI 增益
+    integral_limit_rad_s: 0.20
+    accel_lpf_tau_s: 0.010
+    leso_enable: false        # 对齐 GIMBAL_LQR_LESO_ENABLE = 0
+    leso_bandwidth_radps: 18.0
+    leso_max_comp_nm: 2.0
+    enable_50hz_notch: true   # 对齐 Yaw 50 Hz 扭振陷波器
+  pitch:
+    inertia_kgm2: 0.0115      # 满行程 500 Hz 辨识等效惯量 (kg*m^2)
+    ctrl_inertia_kgm2: 0.0115
+    coulomb_friction_nm: 0.12 # 对齐 GIMBAL_PITCH_COULOMB_FF_NM
+    coulomb_smooth_radps: 0.25
+    viscous_damping: 0.098    # 对齐 GIMBAL_PITCH_VISCOUS_FF_NM_PER_RADPS
+    torque_lag_tau_s: 0.006
+    torque_limit_nm: 4.5      # 对齐 gimbal.c PITCH_TORQUE_LIMIT
+    rated_torque_nm: 3.5
+    peak_torque_nm: 12.5
+    rated_speed_rpm: 120.0
+    no_load_speed_rpm: 200.0
+    max_vel_ref_radps: 11.0   # 对齐 pitch_reference_config.MaxVelocityRadps
+    max_acc_ref_radps2: 135.0 # 对齐 pitch_reference_config.MaxAccelerationRadps2
+    lqr_gain: [20.00, 0.82, 0.0, 85.00]   # 对齐 gimbal.c 500 Hz LQI 增益
+    integral_limit_rad_s: 0.20
+    accel_lpf_tau_s: 0.010
+    leso_enable: false
+    leso_bandwidth_radps: 18.0
+    leso_max_comp_nm: 2.0
+    enable_50hz_notch: false

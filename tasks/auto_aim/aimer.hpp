@@ -2,6 +2,7 @@
 #define AUTO_AIM__AIMER_HPP
 
 #include <Eigen/Dense>
+#include <atomic>
 #include <chrono>
 #include <list>
 
@@ -31,10 +32,13 @@ public:
     std::list<Target> targets, std::chrono::steady_clock::time_point timestamp, double bullet_speed,
     io::ShootMode shoot_mode, bool to_now = true);
 
+  double air_k() const { return air_k_; }
+
 private:
-  double yaw_offset_;
+  std::atomic<double> yaw_offset_{0.0};
   std::optional<double> left_yaw_offset_, right_yaw_offset_;
-  double pitch_offset_;
+  std::atomic<double> pitch_offset_{0.0};
+  double air_k_ = 0.0;
   double comming_angle_;
   double leaving_angle_;
   double lock_id_ = -1;

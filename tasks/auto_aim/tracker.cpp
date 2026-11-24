@@ -24,12 +24,30 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
   normal_temp_lost_count_ = max_temp_lost_count_;
+  use_uvl_ekf_ = yaml["use_uvl_ekf"] ? yaml["use_uvl_ekf"].as<bool>() : true;
+  use_focus_roi_ = yaml["use_focus_roi"] ? yaml["use_focus_roi"].as<bool>() : true;
+  tools::logger()->info(
+    "[Tracker] 观测模式: {} | 动态聚焦 ROI: {}",
+    use_uvl_ekf_ ? "UVL+Diff 图像重投影" : "YPDA PnP 位姿",
+    use_focus_roi_ ? "开启" : "关闭");
+}
+
+cv::Rect Tracker::focus_roi(
+  const cv::Size & img_size, std::chrono::steady_clock::time_point now,
+  const Eigen::Vector3d & self_vel) const
+{
+  const cv::Rect full_rect(0, 0, img_size.width, img_size.height);
+  if (!use_focus_roi_) return full_rect;
+  if (state_ != "tracking" && state_ != "temp_lost") return full_rect;
+  if (!target_.isinit || target_.ekf_x().size() < 13) return full_rect;
+  return target_.focus_roi(solver_, img_size, now, 0.25, 1.0, self_vel);
 }
 
 std::string Tracker::state() const { return state_; }
 
 std::list<Target> Tracker::track(
-  std::list<Armor> & armors, std::chrono::steady_clock::time_point t, bool use_enemy_color)
+  std::list<Armor> & armors, std::chrono::steady_clock::time_point t, bool use_enemy_color,
+  const Eigen::Vector3d & self_vel)
 {
   auto dt = tools::delta_time(t, last_timestamp_);
   last_timestamp_ = t;
@@ -67,7 +85,7 @@ std::list<Target> Tracker::track(
   }
 
   else {
-    found = update_target(armors, t);
+    found = update_target(armors, t, self_vel);
   }
 
   state_machine(found);
@@ -235,37 +253,45 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
   auto & armor = armors.front();
   solver_.solve(armor);
 
-  // 根据兵种优化初始化参数
+  // 根据兵种优化初始化参数。
+  // 1 号是英雄：四块大装甲，90° 分布。只有 3/4/5 号的大装甲才是平衡两板。
   auto is_balance = (armor.type == ArmorType::big) &&
                     (armor.name == ArmorName::three || armor.name == ArmorName::four ||
                      armor.name == ArmorName::five);
 
   if (is_balance) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1, 0.04, 0.04}};
     target_ = Target(armor, t, 0.2, 2, P0_dig);
   }
 
   else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0, 0, 0}};
     target_ = Target(armor, t, 0.2765, 3, P0_dig);
   }
 
   else if (armor.name == ArmorName::base) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0, 0, 0}};
     target_ = Target(armor, t, 0.3205, 3, P0_dig);
   }
 
   else {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
-    target_ = Target(armor, t, 0.2, 4, P0_dig);
+    // 后两维是装甲环 roll/pitch。初始方差约 12°，允许斜面，但不会被单帧法向拉飞。
+    // 1 号英雄的装甲环比步兵大，初值用 0.25 m，仍由观测在线修正，不写入四块板各自半径。
+    // r/l/h 按制作规范 S121/S124 给合理先验方差（std 约 0.10/0.10/0.07 m），
+    // 避免单板 UVL 观测把深度残差对半灌进 r/l 导致首帧即 r<0 发散。
+    const double radius = armor.name == ArmorName::one ? 0.25 : 0.2;
+    Eigen::VectorXd P0_dig{{1, 4, 1, 4, 1, 4, 0.4, 25, 0.01, 0.01, 0.005, 0.04, 0.04}};
+    target_ = Target(armor, t, radius, 4, P0_dig);
   }
 
   return true;
 }
 
-bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t)
+bool Tracker::update_target(
+  std::list<Armor> & armors, std::chrono::steady_clock::time_point t,
+  const Eigen::Vector3d & self_vel)
 {
-  target_.predict(t);
+  target_.predict(t, self_vel);
 
   int found_count = 0;
   double min_x = 1e10;  // 画面最左侧
@@ -277,19 +303,27 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
 
   if (found_count == 0) return false;
 
-  for (auto & armor : armors) {
-    if (
-      armor.name != target_.name || armor.type != target_.armor_type
-      //  || armor.center.x != min_x
-    )
-      continue;
-
-    solver_.solve(armor);
-
-    target_.update(armor);
+  if (use_uvl_ekf_) {
+    std::vector<Armor *> same_armors;
+    for (auto & armor : armors) {
+      if (armor.name != target_.name || armor.type != target_.armor_type) continue;
+      same_armors.push_back(&armor);
+    }
+    return target_.update_uvl(same_armors, solver_);
   }
 
-  return true;
+  bool updated = false;
+  for (auto & armor : armors) {
+    if (armor.name != target_.name || armor.type != target_.armor_type) continue;
+
+    solver_.solve(armor);
+    // solve() 里的 yaw 优化按固定 15° 搜索，斜面上有两个代价接近的极小值。
+    // 这里先按位置选出当前板，再用该板的预测 yaw 消歧，板面 yaw 仍进 EKF。
+    // 状态、观测、雅可比都不变。
+    if (target_.update(armor, solver_)) updated = true;
+  }
+
+  return updated;
 }
 
 }  // namespace auto_aim
