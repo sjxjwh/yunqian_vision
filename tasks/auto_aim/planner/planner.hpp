@@ -128,6 +128,14 @@ public:
     fire_prob_dist_far_ = std::max(fire_prob_dist_near_ + 0.1, d_far);
   }
   double fire_prob_thresh() const { return fire_prob_thresh_.load(std::memory_order_relaxed); }
+  void set_outpost_fire_prob_thresh(double thresh)
+  {
+    outpost_fire_prob_thresh_.store(std::clamp(thresh, 0.0, 0.95), std::memory_order_relaxed);
+  }
+  double outpost_fire_prob_thresh() const
+  {
+    return outpost_fire_prob_thresh_.load(std::memory_order_relaxed);
+  }
   void set_use_fire_mlp(bool enable) { use_fire_mlp_.store(enable, std::memory_order_relaxed); }
   bool use_fire_mlp() const { return use_fire_mlp_.load(std::memory_order_relaxed); }
   void set_gun_sigma_deg(double sy_deg, double sp_deg)
@@ -174,8 +182,9 @@ public:
       std::clamp(min_hz, 1.0, max_fire_rate_hz_.load(std::memory_order_relaxed)),
       std::memory_order_relaxed);
   }
-  double effective_fire_thresh(double dist_m) const;
-  float recommend_fire_rate_hz(double p_hit, double eff_thresh, bool plate_switched) const;
+  double effective_fire_thresh(double dist_m, bool is_outpost = false) const;
+  float recommend_fire_rate_hz(
+    double p_hit, double eff_thresh, bool plate_switched, bool is_outpost = false) const;
 
 private:
   std::atomic<double> yaw_offset_{0.0};
@@ -183,10 +192,11 @@ private:
   // Layer 2 物理不确定度命中概率参数（可由 AimCorrector 实测散布在线更新）
   std::atomic<double> gun_sigma_yaw_rad_{0.25 * M_PI / 180.0};
   std::atomic<double> gun_sigma_pitch_rad_{0.25 * M_PI / 180.0};
-  std::atomic<double> fire_prob_thresh_{0.0};      // 近距/固定概率开火阈值 (>0 启用，<=0 回退 fire_margin)
-  std::atomic<double> fire_prob_thresh_far_{0.0};  // 远距 Peek 概率阈值 (<=0 表示固定不随距离插值)
-  double fire_prob_dist_near_ = 2.0;               // 近距爆发距离拐点 (m)
-  double fire_prob_dist_far_ = 4.5;                // 远距 Peek 距离拐点 (m)
+  std::atomic<double> fire_prob_thresh_{0.0};          // 近距/固定概率开火阈值 (>0 启用，<=0 回退 fire_margin)
+  std::atomic<double> fire_prob_thresh_far_{0.0};      // 远距 Peek 概率阈值 (<=0 表示固定不随距离插值)
+  std::atomic<double> outpost_fire_prob_thresh_{0.45}; // 前哨站最大 DPS 概率开火阈值（不走远距 Peek 拉升）
+  double fire_prob_dist_near_ = 2.0;                   // 近距爆发距离拐点 (m)
+  double fire_prob_dist_far_ = 4.5;                    // 远距 Peek 距离拐点 (m)
   std::atomic<bool> use_fire_mlp_{false};          // 启用 Layer 3 残差 MLP 修正 P_phys
   std::atomic<int> fire_tactical_mode_{static_cast<int>(FireTacticalMode::Normal)};
   std::atomic<int> level_phase_{static_cast<int>(LevelPhase::Unknown)};
@@ -202,7 +212,9 @@ private:
   double fire_thresh_;
   int shoot_offset_ = 2;
   double fire_margin_ = 0.85;
+  double outpost_fire_margin_ = 0.95;
   double max_fire_angle_ = 60.0 / 57.3;
+  double outpost_max_fire_angle_ = 70.0 / 57.3;
   double low_speed_delay_time_, high_speed_delay_time_, decision_speed_;
   double active_delay_time_ = 0.0;
   SelfMotion active_self_motion_{};

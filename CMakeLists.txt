@@ -172,6 +172,14 @@ target_link_libraries(shoot_on_move_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARG
 add_executable(fire_prob_test tests/fire_prob_test.cpp)
 target_link_libraries(fire_prob_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim sim_io tools)
 
+# 高保真同步录制与离线回放（100Hz 图像 + 1000Hz IMU）单元测试（不依赖相机 SDK 与串口）。
+add_executable(sync_recorder_test tests/sync_recorder_test.cpp)
+target_link_libraries(sync_recorder_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} tools)
+
+# 离线同步回放自瞄入口（不依赖相机 SDK 与串口，支持 --latency-ms 离线 A/B 调参与 WebViewer）。
+add_executable(replay_standard src/replay_standard.cpp)
+target_link_libraries(replay_standard ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim tools)
+
 # 实机相机识别 + WebViewer 实时网页预览（无头 SSH 可直接看实时识别与 3D 重建）。
 add_executable(camera_web_test tests/camera_web_test.cpp)
 target_link_libraries(camera_web_test ${OpenCV_LIBS} fmt::fmt ${YAML_CPP_TARGET} auto_aim tools io)
@@ -180,6 +188,7 @@ if(TBB_LIBRARY)
   target_link_libraries(uvl_tracker_test ${TBB_LIBRARY})
   target_link_libraries(shoot_on_move_test ${TBB_LIBRARY})
   target_link_libraries(fire_prob_test ${TBB_LIBRARY})
+  target_link_libraries(replay_standard ${TBB_LIBRARY})
 endif()
 
 # 检查 ROS 环境

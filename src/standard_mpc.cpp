@@ -28,6 +28,7 @@
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
+#include "tools/sync_recorder.hpp"
 #include "tools/web_viewer.hpp"
 
 const std::string keys =
@@ -36,7 +37,8 @@ const std::string keys =
   "{force-aim      | false                  | 忽略电控 mode，强制进入自瞄跟随模式 }"
   "{web            | false                  | 开启 WebViewer 实时画面与跟踪曲线 }"
   "{port p         | 8090                   | WebViewer 监听端口 }"
-  "{record         | false                  | 开启视频录制 }"
+  "{record         | false                  | 开启传统视频录制 }"
+  "{sync-record    |                        | 开启同步录制(图像+1000Hz IMU)，填 auto 或目录路径 }"
   "{@config-path   | configs/standard3.yaml | yaml配置文件路径 }";
 
 using namespace std::chrono_literals;
@@ -54,11 +56,21 @@ int main(int argc, char * argv[])
   const bool enable_web = cli.get<bool>("web");
   const auto web_port = static_cast<uint16_t>(cli.get<int>("port"));
   const bool enable_record = cli.get<bool>("record");
+  const auto sync_record_dir = cli.get<std::string>("sync-record");
 
   tools::Exiter exiter;
   tools::Plotter plotter;
   std::unique_ptr<tools::Recorder> recorder;
   if (enable_record) recorder = std::make_unique<tools::Recorder>();
+
+  std::unique_ptr<tools::SyncRecorder> sync_recorder;
+  if (!sync_record_dir.empty()) {
+    tools::SyncRecorder::Options opts;
+    opts.output_dir = sync_record_dir;
+    opts.config_path = config_path;
+    opts.fps_hint = 100.0;
+    sync_recorder = std::make_unique<tools::SyncRecorder>(opts);
+  }
 
   std::unique_ptr<tools::WebViewer> viewer;
   if (enable_web) viewer = std::make_unique<tools::WebViewer>(web_port, "web");
@@ -79,6 +91,10 @@ int main(int argc, char * argv[])
     config_path, no_fire, force_aim, enable_web, web_port, enable_record);
 
   io::Gimbal gimbal(config_path);
+  if (sync_recorder) {
+    gimbal.set_sample_callback(
+      [&sync_recorder](const tools::SyncImuSample & s) { sync_recorder->record_imu(s); });
+  }
   io::Camera camera(config_path);
 
   auto_aim::YOLO yolo(config_path, false);
@@ -152,6 +168,7 @@ int main(int argc, char * argv[])
     auto q = gimbal.q(t);
     auto gs = gimbal.state();
     if (recorder) recorder->record(img, q, t);
+    if (sync_recorder) sync_recorder->record_frame(img, t);
     solver.set_R_gimbal2world(q);
 
     std::list<auto_aim::Armor> armors_vis;

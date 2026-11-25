@@ -40,7 +40,9 @@ cv::Rect Tracker::focus_roi(
   if (!use_focus_roi_) return full_rect;
   if (state_ != "tracking" && state_ != "temp_lost") return full_rect;
   if (!target_.isinit || target_.ekf_x().size() < 13) return full_rect;
-  return target_.focus_roi(solver_, img_size, now, 0.25, 1.0, self_vel);
+  // 前哨站为静止建筑，单板切换周期约 0.834s，保持聚焦放大 ROI 覆盖完整换板周期，避免退回全图导致远距像素骤缩
+  const double lost_timeout_s = (target_.name == ArmorName::outpost) ? 0.85 : 0.25;
+  return target_.focus_roi(solver_, img_size, now, lost_timeout_s, 1.0, self_vel);
 }
 
 std::string Tracker::state() const { return state_; }
@@ -265,7 +267,8 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
   }
 
   else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0, 0, 0}};
+    // KI-002：复用 x[9]/x[10] 在线估计板 1/板 2 相对板 0 的高度差（P0=0.09 -> 1σ=0.30m）
+    Eigen::VectorXd P0_dig{{1, 4, 1, 4, 1, 4, 0.4, 100, 1e-4, 0.09, 0.09, 0, 0}};
     target_ = Target(armor, t, 0.2765, 3, P0_dig);
   }
 

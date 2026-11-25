@@ -50,13 +50,13 @@ EXPANDED=()
 for t in "${TARGETS[@]}"; do
   case "$t" in
     sim)
-      EXPANDED+=(sim_standard shoot_on_move_test uvl_tracker_test aim_corrector_test sim_camera_model_test)
+      EXPANDED+=(sim_standard replay_standard shoot_on_move_test uvl_tracker_test aim_corrector_test sim_camera_model_test sync_recorder_test)
       ;;
     real)
-      EXPANDED+=(standard_mpc camera_web_test real_gimbal_sysid)
+      EXPANDED+=(standard_mpc replay_standard camera_web_test real_gimbal_sysid)
       ;;
     tests)
-      EXPANDED+=(shoot_on_move_test uvl_tracker_test aim_corrector_test sim_camera_model_test)
+      EXPANDED+=(shoot_on_move_test uvl_tracker_test aim_corrector_test sim_camera_model_test sync_recorder_test)
       ;;
     all)
       BUILD_ALL=1

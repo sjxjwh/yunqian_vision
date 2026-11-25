@@ -3,7 +3,7 @@
 ## KI-001 仿真“斜面上旋转的英雄”无法稳定重建
 
 - 记录日期：2026-11-15
-- 状态：2026-11-17 复测。斜面英雄静止与匀速转已不再失锁，但相位每圈少记一块，未通过验收；平地步兵换板与旋转正常；前哨站三块板被当成同一高度，换板时俯仰跳变
+- 状态：**已解决**（2026-11-20 移植武科图像平面 UVL + `DiffMeasure` 观测后关闭，`uvl_tracker_test` 斜面旋转回归 `180/180` 零失锁、`med|w_err|=0.05 rad/s`、`med_px_err=0.53 px`）
 - 影响模块：`tasks/auto_aim/target.*`、`tasks/auto_aim/tracker.*`、`src/sim_standard.cpp` / 网页 viewer
 
 ### 现象
@@ -107,8 +107,8 @@ NIS 阈值按观测维度取：4 维保持原来的 0.711，6 维用 χ²(6) 的
 ### KI-002 前哨站三块装甲板被当成同一高度
 
 - 记录日期：2026-11-17
-- 状态：已确认，未改模型
-- 影响模块：`tasks/auto_aim/target.cpp` 的三块板分支
+- 状态：**已解决**（2026-11-25）：保持 13 维状态不变，在 `armor_num_ == 3` 时复用闲置 `x[9]`/`x[10]` 在线估计板 1/板 2 相对板 0 的高度差，同步更新 `Target::diverged()`、`Q` 与 `Tracker` 前哨站 `P0_dig`；`uvl_tracker_test` 新增 `OutpostThreeHeights` 回归通过（`tracked=180/180`、`med|w_err|=0.000 rad/s`、`med|h_err|=0.0001 m`、`med_px_err=0.53 px`）
+- 影响模块：`tasks/auto_aim/target.cpp`、`tasks/auto_aim/tracker.cpp`、`tests/uvl_tracker_test.cpp`
 
 `h_armor_xyz()` 在 `armor_num_ == 3` 时三块板都返回 `x[4]`。`x[9]`（半径差）和 `x[10]`（高度差）只在两块板、四块板的 `armor_offset()` 里使用；前哨站初始化又把这两维和倾角的 `P0` 置 0。现有状态里的一个 `h` 不够表示三块互不相同的高度。
 
@@ -190,3 +190,13 @@ if (std::abs(target.ekf_x()[8]) <= 2 && target.name != ArmorName::outpost)
    - Yaw 轴阻尼偏低（`zeta=0.517`），开启传递函数 MPC + 速度前馈双重补偿时会明显过冲（换板过冲达 `5.3°`），需电控提高 Yaw 阻尼（目标 `zeta ≈ 0.8~0.9`）；
    - 修复下位机 IMU 安装角与零漂，待 IMU 可信后将 `use_euler_q` 切回 `false`。
    - 当前 `configs/standard3.yaml` 保留 `use_uvl_ekf: true`、`use_focus_roi: true`、`zero_vel_ff: false`、`delay=0.020 s`、`gimbal_yaw_wn / gimbal_pitch_wn: 0.0`（已同步至 Orin NX）。
+
+### 后续演进方案设计（2026-11-25 调研与用户确认，暂缓实现）
+
+1. **自动外参 + 延迟联合标定（方案 1A，待 2027 新装甲板定型后实现）**：
+   - **标定靶标**：不用额外标定板，直接使用静态装甲板作为标定靶（因 2027 新规则取消灯条并更换装甲板图案，待新装甲板尺寸与检测模型确定后接入；底层观测接口 `{timestamp, pts_3d, pts_2d}` 与靶标解耦）。
+   - **求解原理**：两阶段纯 Eigen Levenberg-Marquardt + Huber 核直接重投影 BA（不引入 Ceres 依赖）——阶段 1 用静止/低角速度帧钉死 `R_camera2gimbal`（3 DOF）与目标世界位姿，默认固定 `t_camera2gimbal` 避免光轴平移耦合；阶段 2 用中高速摆头帧通过高频 IMU 轨迹 SLERP 插值优化 `camera_latency_ms`（1 DOF）。
+   - **采集模式**：同时支持**手动扫动**（手推/遥控器）与**自动扫动**（程序发串口网格+正弦扫动），无头终端输出进度 + 可选复用 `WebViewer`，并带轴向激励覆盖度与正负号一致性自动预检。
+   - **验证集成**：同步编写 `tests/extrinsic_calib_test.cpp`（合成真值验证旋转 `< 0.05°`、延迟 `< 0.2 ms`）并接入 `scripts/run_tests.sh`。
+2. **明确视觉/电控分工边界**：视觉侧坚持只输出平滑可达参考轨迹 `(pos, vel, acc)`，不在视觉侧叠加云台传递函数逆模型；阻尼与动力学前馈统一下沉电控 1 kHz 闭环处理。
+3. **暂不投入旧灯条模型与传统精修**：2027 赛季取消灯条、更换装甲板图案，不再针对旧灯条替换 2026 四点模型或优化传统灯条精修。

@@ -26,7 +26,12 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
   model_path_ = yaml["yolov5_model_path"].as<std::string>();
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
-  min_confidence_ = yaml["min_confidence"].as<double>();
+  min_confidence_ = std::clamp(yaml["min_confidence"].as<double>(), 0.05, 0.99);
+  outpost_min_confidence_ =
+    yaml["outpost_min_confidence"]
+      ? std::clamp(yaml["outpost_min_confidence"].as<double>(), 0.05, 0.99)
+      : min_confidence_;
+  update_score_threshold();
   int x = 0, y = 0, width = 0, height = 0;
   x = yaml["roi"]["x"].as<int>();
   y = yaml["roi"]["y"].as<int>();
@@ -40,14 +45,15 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
   save_path_ = "imgs";
   std::filesystem::create_directory(save_path_);
 
-  logit_threshold_ = std::log(score_threshold_ / (1.0f - score_threshold_));
-
   const int vote_frames = yaml["vote_frames"] ? yaml["vote_frames"].as<int>() : 0;
 
   // 运行期可调参数
   auto & rp = tools::RuntimeParams::instance();
   rp.add("yolo.min_confidence", "最小置信度(后过滤)", 0.1, 0.99, [this] { return min_confidence_; },
-         [this](double v) { min_confidence_ = v; }, "min_confidence");
+         [this](double v) { set_min_confidence(v); }, "min_confidence");
+  rp.add("yolo.outpost_min_confidence", "前哨站最小置信度", 0.1, 0.99,
+         [this] { return outpost_min_confidence_; },
+         [this](double v) { set_outpost_min_confidence(v); }, "outpost_min_confidence");
   rp.add("yolo.vote_frames", "识别平滑帧数(0=关)", 0, 15,
          [this] { return double(smoother_.frames()); },
          [this](double v) { smoother_.set_frames(int(v)); }, "vote_frames");
@@ -324,7 +330,8 @@ std::list<Armor> YOLOV5::parse(
 bool YOLOV5::check_name(const Armor & armor) const
 {
   auto name_ok = armor.name != ArmorName::not_armor;
-  auto confidence_ok = armor.confidence > min_confidence_;
+  const double thr = (armor.name == ArmorName::outpost) ? outpost_min_confidence_ : min_confidence_;
+  auto confidence_ok = armor.confidence > thr;
 
   // 保存不确定的图案，用于神经网络的迭代
   // if (name_ok && !confidence_ok) save(armor);

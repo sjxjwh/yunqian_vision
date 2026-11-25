@@ -191,6 +191,124 @@ bool run_scenario(
   }
   return true;
 }
+
+bool run_outpost_three_heights_test(const std::string & cfg)
+{
+  Solver solver(cfg);
+  solver.set_R_gimbal2world(Eigen::Quaterniond::Identity());
+  Tracker tracker(cfg, solver);
+
+  const Eigen::Vector3d center(3.2, 0.1, 0.15);
+  const double r = 0.2765;
+  const double w = -2.51;
+  const std::array<double, 3> gt_z_offsets{0.0, 0.22, -0.15};
+  std::array<double, 3> gt_z_sorted = gt_z_offsets;
+  std::sort(gt_z_sorted.begin(), gt_z_sorted.end());
+  const double gt_span_01 = gt_z_sorted[1] - gt_z_sorted[0];
+  const double gt_span_12 = gt_z_sorted[2] - gt_z_sorted[1];
+
+  std::mt19937 rng(2027);
+  std::normal_distribution<float> noise(0.0f, 0.45f);
+  const auto t0 = std::chrono::steady_clock::now();
+  const int total_frames = 360;
+  const int warmup_frames = 180;
+
+  int tracked_after_warmup = 0;
+  std::vector<double> w_errs, h_errs, px_errs;
+
+  for (int f = 0; f < total_frames; ++f) {
+    const double t_sec = f * 0.01;
+    const auto tp = t0 + std::chrono::milliseconds(f * 10);
+
+    std::list<Armor> armors;
+    for (int i = 0; i < 3; ++i) {
+      const double yaw = tools::limit_rad(0.2 + w * t_sec + i * 2.0 * CV_PI / 3.0);
+      const Eigen::Vector3d xyz(
+        center.x() - r * std::cos(yaw), center.y() - r * std::sin(yaw), center.z() + gt_z_offsets[i]);
+
+      std::array<Eigen::Vector3d, 4> pts_cam;
+      bool front = false;
+      if (!solver.armor_corners_in_camera(
+            xyz, yaw, ArmorType::small, ArmorName::outpost, 0.0, 0.0, pts_cam, &front)) {
+        continue;
+      }
+      if (!front) continue;
+      const Eigen::Vector3d n_world(-std::cos(yaw), -std::sin(yaw), 0.0);
+      if (n_world.dot((-xyz).normalized()) < std::cos(62.0 * CV_PI / 180.0)) continue;
+
+      auto px = solver.reproject_armor(xyz, yaw, ArmorType::small, ArmorName::outpost, 0.0, 0.0);
+      if (px.size() != 4) continue;
+
+      std::vector<cv::Point2f> noisy_pts(4);
+      cv::Point2f c2d(0.f, 0.f);
+      for (int k = 0; k < 4; ++k) {
+        noisy_pts[k] = cv::Point2f(px[k].x + noise(rng), px[k].y + noise(rng));
+        c2d += noisy_pts[k];
+      }
+      c2d *= 0.25f;
+      Armor a(0, 6, 0.95f, cv::boundingRect(noisy_pts), noisy_pts);
+      a.type = ArmorType::small;
+      a.name = ArmorName::outpost;
+      a.color = Color::red;
+      a.center = c2d;
+      a.points = noisy_pts;
+      armors.push_back(a);
+    }
+
+    auto targets = tracker.track(armors, tp);
+    if (f >= warmup_frames && !targets.empty()) {
+      tracked_after_warmup++;
+      const auto & tgt = targets.front();
+      const auto & x = tgt.ekf_x();
+      w_errs.push_back(std::abs(x[7] - w));
+
+      // 与首帧锁定哪块板无关：把三块预测板高度排序后校验相邻档位差
+      std::array<double, 3> est_z{0.0, x[9], x[10]};
+      std::sort(est_z.begin(), est_z.end());
+      const double err_h = std::max(
+        std::abs((est_z[1] - est_z[0]) - gt_span_01),
+        std::abs((est_z[2] - est_z[1]) - gt_span_12));
+      h_errs.push_back(err_h);
+
+      if (!armors.empty()) {
+        const auto xyza_list = tgt.armor_xyza_list();
+        double best_err = 1e9;
+        for (const auto & a : armors) {
+          for (const auto & xyza : xyza_list) {
+            auto proj = solver.reproject_armor(
+              xyza.head<3>(), xyza[3], ArmorType::small, ArmorName::outpost, 0.0, 0.0);
+            if (proj.size() != 4) continue;
+            double e = 0.0;
+            for (int k = 0; k < 4; ++k) e += cv::norm(proj[k] - a.points[k]);
+            best_err = std::min(best_err, e * 0.25);
+          }
+        }
+        if (best_err < 1e8) px_errs.push_back(best_err);
+      }
+    }
+  }
+
+  auto median = [](std::vector<double> v) {
+    if (v.empty()) return 1e9;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  const double med_w = median(w_errs);
+  const double med_h = median(h_errs);
+  const double med_px = median(px_errs);
+
+  fmt::print(
+    "[OutpostThreeHeights] tracked={}/180 | med|w_err|={:.3f} rad/s | med|h_err|={:.4f} m | "
+    "med_px_err={:.2f} px\n",
+    tracked_after_warmup, med_w, med_h, med_px);
+
+  if (tracked_after_warmup < 175 || med_w > 0.15 || med_h > 0.01 || med_px > 1.5) {
+    fmt::print(
+      "[FAIL] OutpostThreeHeights 超出阈值 (tracked>=175, w<=0.15, h<=0.01, px<=1.5)\n");
+    return false;
+  }
+  return true;
+}
 }  // namespace
 
 int main(int argc, char ** argv)
@@ -240,6 +358,9 @@ int main(int argc, char ** argv)
   slope_car.ring_roll = 5.0 * CV_PI / 180.0;
   slope_car.ring_pitch = -8.0 * CV_PI / 180.0;
   if (!run_scenario("SlopeSpinCar", slope_car, cfg, 0.50, 0.03, 4.5)) return 1;
+
+  // 4. 三档不等高旋转前哨站（KI-002 回归）
+  if (!run_outpost_three_heights_test(cfg)) return 1;
 
   fmt::print("ALL UVL + FOCUS_ROI TESTS PASSED!\n");
   return 0;

@@ -15,6 +15,7 @@ ALL_TESTS=(
   uvl_tracker_test
   aim_corrector_test
   sim_camera_model_test
+  sync_recorder_test
 )
 
 usage() {

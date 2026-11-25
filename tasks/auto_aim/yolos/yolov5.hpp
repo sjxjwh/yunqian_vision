@@ -1,7 +1,9 @@
 #ifndef AUTO_AIM__YOLOV5_HPP
 #define AUTO_AIM__YOLOV5_HPP
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <list>
 #include <opencv2/opencv.hpp>
 #include <openvino/openvino.hpp>
@@ -27,7 +29,16 @@ public:
   YOLOV5(const std::string & config_path, bool debug);
 
   std::list<Armor> detect(const cv::Mat & bgr_img, int frame_count) override;
-  void set_min_confidence(double c) override { min_confidence_ = c; }
+  void set_min_confidence(double c) override
+  {
+    min_confidence_ = std::clamp(c, 0.05, 0.99);
+    update_score_threshold();
+  }
+  void set_outpost_min_confidence(double c)
+  {
+    outpost_min_confidence_ = std::clamp(c, 0.05, 0.99);
+    update_score_threshold();
+  }
   void set_vote_frames(int n) override { smoother_.set_frames(n); }
 
   std::list<Armor> postprocess(
@@ -40,9 +51,15 @@ private:
 
   const int class_num_ = 13;
   const float nms_threshold_ = 0.3;
-  const float score_threshold_ = 0.7;
+  float score_threshold_ = 0.7;
   float logit_threshold_;  // log(thr/(1-thr))，等价于 sigmoid(score)>=thr，省掉 exp
-  double min_confidence_, binary_threshold_;
+  double min_confidence_, outpost_min_confidence_, binary_threshold_;
+  void update_score_threshold()
+  {
+    const double eff_min = std::min(min_confidence_, outpost_min_confidence_);
+    score_threshold_ = static_cast<float>(std::min(0.7, eff_min));
+    logit_threshold_ = std::log(score_threshold_ / (1.0f - score_threshold_));
+  }
 
   ov::Core core_;
   ov::CompiledModel compiled_model_;

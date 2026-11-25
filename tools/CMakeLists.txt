@@ -12,6 +12,7 @@ add_library(tools OBJECT
     gimbal_csv_logger.cpp
     trajectory.cpp
     recorder.cpp
+    sync_recorder.cpp
     logger.cpp
     pid.cpp
     crc.cpp

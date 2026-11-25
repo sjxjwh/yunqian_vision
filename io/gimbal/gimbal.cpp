@@ -154,6 +154,12 @@ void Gimbal::send(
   }
 }
 
+void Gimbal::set_sample_callback(std::function<void(const tools::SyncImuSample &)> cb)
+{
+  std::lock_guard<std::mutex> lock(callback_mtx_);
+  sample_callback_ = std::move(cb);
+}
+
 bool Gimbal::read(uint8_t * buffer, size_t size)
 {
   try {
@@ -201,45 +207,74 @@ void Gimbal::read_thread()
     error_count = 0;
     const double yaw_rad = static_cast<double>(rx_data_.yaw);
     const double pitch_vis = static_cast<double>(rx_data_.pitch) * pitch_sign_;
+    const Eigen::Quaterniond raw_q =
+      Eigen::Quaterniond(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]).normalized();
     Eigen::Quaterniond q =
       use_euler_q_
         ? Eigen::Quaterniond(
             Eigen::AngleAxisd(yaw_rad, Eigen::Vector3d::UnitZ()) *
             Eigen::AngleAxisd(pitch_vis, Eigen::Vector3d::UnitY()))
             .normalized()
-        : (Eigen::Quaterniond(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]) *
-           q_gimbal2imu_)
-            .normalized();
+        : (raw_q * q_gimbal2imu_).normalized();
     queue_.push({q, t});
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    GimbalState state_snapshot{};
+    uint8_t mode_raw = rx_data_.mode;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
 
-    const float p_sign = static_cast<float>(pitch_sign_);
-    state_.yaw = rx_data_.yaw;
-    state_.yaw_vel = rx_data_.yaw_vel;
-    state_.pitch = rx_data_.pitch * p_sign;
-    state_.pitch_vel = rx_data_.pitch_vel * p_sign;
-    state_.roll = use_euler_q_ ? 0.0f : static_cast<float>(tools::eulers(q, 2, 1, 0)[2]);
-    state_.bullet_speed = rx_data_.bullet_speed;
-    state_.bullet_count = rx_data_.bullet_count;
+      const float p_sign = static_cast<float>(pitch_sign_);
+      state_.yaw = rx_data_.yaw;
+      state_.yaw_vel = rx_data_.yaw_vel;
+      state_.pitch = rx_data_.pitch * p_sign;
+      state_.pitch_vel = rx_data_.pitch_vel * p_sign;
+      state_.roll = use_euler_q_ ? 0.0f : static_cast<float>(tools::eulers(q, 2, 1, 0)[2]);
+      state_.bullet_speed = rx_data_.bullet_speed;
+      state_.bullet_count = rx_data_.bullet_count;
+      state_snapshot = state_;
 
-    switch (rx_data_.mode) {
-      case 0:
-        mode_ = GimbalMode::IDLE;
-        break;
-      case 1:
-        mode_ = GimbalMode::AUTO_AIM;
-        break;
-      case 2:
-        mode_ = GimbalMode::SMALL_BUFF;
-        break;
-      case 3:
-        mode_ = GimbalMode::BIG_BUFF;
-        break;
-      default:
-        mode_ = GimbalMode::IDLE;
-        tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
-        break;
+      switch (rx_data_.mode) {
+        case 0:
+          mode_ = GimbalMode::IDLE;
+          break;
+        case 1:
+          mode_ = GimbalMode::AUTO_AIM;
+          break;
+        case 2:
+          mode_ = GimbalMode::SMALL_BUFF;
+          break;
+        case 3:
+          mode_ = GimbalMode::BIG_BUFF;
+          break;
+        default:
+          mode_ = GimbalMode::IDLE;
+          tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
+          break;
+      }
+    }
+
+    std::function<void(const tools::SyncImuSample &)> cb;
+    {
+      std::lock_guard<std::mutex> lock(callback_mtx_);
+      cb = sample_callback_;
+    }
+    if (cb) {
+      tools::SyncImuSample s;
+      s.t = t;
+      s.mode = mode_raw;
+      s.q = q;
+      s.raw_q = raw_q;
+      s.yaw = state_snapshot.yaw;
+      s.yaw_vel = state_snapshot.yaw_vel;
+      s.pitch = state_snapshot.pitch;
+      s.pitch_vel = state_snapshot.pitch_vel;
+      s.roll = state_snapshot.roll;
+      s.bullet_speed = state_snapshot.bullet_speed;
+      s.bullet_count = state_snapshot.bullet_count;
+      s.vx = state_snapshot.vx;
+      s.vy = state_snapshot.vy;
+      s.vz = state_snapshot.vz;
+      cb(s);
     }
   }
 

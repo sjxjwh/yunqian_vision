@@ -9,7 +9,8 @@ yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
 trt_engine_path: assets/yolov5_rtx4060.engine
 device: CPU
-min_confidence: 0.8
+min_confidence: 0.78
+outpost_min_confidence: 0.55
 use_traditional: true
 
 #####-----ROI-----#####
@@ -36,7 +37,7 @@ max_rectangular_error: 25
 #####-----tracker参数-----#####
 min_detect_count: 5
 max_temp_lost_count: 15
-outpost_max_temp_lost_count: 75
+outpost_max_temp_lost_count: 150
 use_uvl_ekf: true
 use_focus_roi: true
 
@@ -72,6 +73,9 @@ fire_prob_thresh: 0.70
 fire_prob_thresh_far: 0.82
 fire_prob_dist_near: 3.0
 fire_prob_dist_far: 5.0
+# 前哨站最大 DPS 专用火控（固定建筑匀速 2.51 rad/s，不走远距 Peek 抬升与四板步兵 MLP）
+outpost_fire_prob_thresh: 0.45
+outpost_max_fire_angle: 70 # degree
 use_fire_mlp: true
 # 机械组可保证 5m 静止散布在单块小装甲板内 (3σ <= 67.5mm -> σ <= 0.25°)，默认先验 0.20°；开启 AimCorrector 后由实测散布自动 EMA 更新
 gun_sigma_yaw_deg: 0.20

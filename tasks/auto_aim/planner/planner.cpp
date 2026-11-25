@@ -103,7 +103,14 @@ Planner::Planner(const std::string & config_path)
   fire_thresh_ = tools::read<double>(yaml, "fire_thresh");
   if (yaml["shoot_offset"]) shoot_offset_ = yaml["shoot_offset"].as<int>();
   if (yaml["fire_margin"]) fire_margin_ = yaml["fire_margin"].as<double>();
+  if (yaml["outpost_fire_margin"]) {
+    outpost_fire_margin_ = std::clamp(yaml["outpost_fire_margin"].as<double>(), 0.1, 1.1);
+  }
   if (yaml["max_fire_angle"]) max_fire_angle_ = yaml["max_fire_angle"].as<double>() / 57.3;
+  if (yaml["outpost_max_fire_angle"]) {
+    outpost_max_fire_angle_ =
+      std::clamp(yaml["outpost_max_fire_angle"].as<double>(), 10.0, 82.0) / 57.3;
+  }
   if (yaml["fire_prob_thresh"]) {
     fire_prob_thresh_.store(
       std::clamp(yaml["fire_prob_thresh"].as<double>(), 0.0, 0.999), std::memory_order_relaxed);
@@ -111,6 +118,11 @@ Planner::Planner(const std::string & config_path)
   if (yaml["fire_prob_thresh_far"]) {
     fire_prob_thresh_far_.store(
       std::clamp(yaml["fire_prob_thresh_far"].as<double>(), 0.0, 0.999), std::memory_order_relaxed);
+  }
+  if (yaml["outpost_fire_prob_thresh"]) {
+    outpost_fire_prob_thresh_.store(
+      std::clamp(yaml["outpost_fire_prob_thresh"].as<double>(), 0.0, 0.95),
+      std::memory_order_relaxed);
   }
   if (yaml["fire_prob_dist_near"]) {
     fire_prob_dist_near_ = std::max(0.1, yaml["fire_prob_dist_near"].as<double>());
@@ -177,6 +189,13 @@ Planner::Planner(const std::string & config_path)
     },
     "fire_prob_thresh_far");
   rp.add(
+    "planner.outpost_fire_prob_thresh", "前哨站最大 DPS 命中概率阈值 (0=复用常规近距阈值)", 0.0, 0.95,
+    [this] { return outpost_fire_prob_thresh_.load(std::memory_order_relaxed); },
+    [this](double v) {
+      outpost_fire_prob_thresh_.store(std::clamp(v, 0.0, 0.95), std::memory_order_relaxed);
+    },
+    "outpost_fire_prob_thresh");
+  rp.add(
     "planner.use_fire_mlp", "启用 Layer 3 残差 MLP 校准 (0/1)", 0.0, 1.0,
     [this] { return use_fire_mlp_.load(std::memory_order_relaxed) ? 1.0 : 0.0; },
     [this](double v) { use_fire_mlp_.store(v > 0.5, std::memory_order_relaxed); }, "use_fire_mlp",
@@ -237,10 +256,31 @@ Planner::Planner(const std::string & config_path)
     "max_fire_rate_hz", 1.0);
 }
 
-double Planner::effective_fire_thresh(double dist_m) const
+double Planner::effective_fire_thresh(double dist_m, bool is_outpost) const
 {
   const double p_near = fire_prob_thresh_.load(std::memory_order_relaxed);
   if (p_near <= 1e-6) return 0.0;
+
+  const auto mode = static_cast<FireTacticalMode>(fire_tactical_mode_.load(std::memory_order_relaxed));
+  const double heat = heat_ratio_.load(std::memory_order_relaxed);
+
+  // 前哨站最大 DPS 解：固定建筑不还手、不逃跑，不走远距 Peek 抬升与等级发育偏置；
+  // 热量充裕时按低门槛全速拆塔，仅在热量接近上限 (>0.70) 且非爆发模式时平滑抬高阈值，
+  // 把剩余热量集中分配到高 p_hit 正对窗口，最大化热量受限下的长期平均 DPS。
+  if (is_outpost) {
+    const double p_out = outpost_fire_prob_thresh_.load(std::memory_order_relaxed);
+    double base = (p_out > 1e-6) ? p_out : p_near;
+    double delta = 0.0;
+    switch (mode) {
+      case FireTacticalMode::Burst: delta -= 0.10; break;
+      case FireTacticalMode::Eco:   delta += 0.08; break;
+      default: break;
+    }
+    if (mode != FireTacticalMode::Burst && heat > 0.70) {
+      delta += 0.15 * std::clamp((heat - 0.70) / 0.30, 0.0, 1.0);
+    }
+    return std::clamp(base + delta, 0.25, 0.90);
+  }
 
   double base = p_near;
   const double p_far = fire_prob_thresh_far_.load(std::memory_order_relaxed);
@@ -256,7 +296,6 @@ double Planner::effective_fire_thresh(double dist_m) const
     case LevelPhase::Capped:   delta += 0.05; break;
     default: break;
   }
-  const auto mode = static_cast<FireTacticalMode>(fire_tactical_mode_.load(std::memory_order_relaxed));
   switch (mode) {
     case FireTacticalMode::Burst: delta -= 0.15; break;
     case FireTacticalMode::Eco:   delta += 0.08; break;
@@ -270,7 +309,6 @@ double Planner::effective_fire_thresh(double dist_m) const
 
   // 高热量保护协同：非强制爆发模式下，热量占比 > 0.70 时平滑抬高阈值（至多 +0.08），
   // 把最后宝贵热量留给高命中概率窗口；硬限幅与防超热仍由电控 1 kHz 闭环兜底。
-  const double heat = heat_ratio_.load(std::memory_order_relaxed);
   if (mode != FireTacticalMode::Burst && heat > 0.70) {
     delta += 0.08 * std::clamp((heat - 0.70) / 0.30, 0.0, 1.0);
   }
@@ -278,7 +316,8 @@ double Planner::effective_fire_thresh(double dist_m) const
   return std::clamp(base + delta, 0.45, 0.90);
 }
 
-float Planner::recommend_fire_rate_hz(double p_hit, double eff_thresh, bool plate_switched) const
+float Planner::recommend_fire_rate_hz(
+  double p_hit, double eff_thresh, bool plate_switched, bool is_outpost) const
 {
   const double max_hz = max_fire_rate_hz_.load(std::memory_order_relaxed);
   const double min_hz = std::min(min_fire_rate_hz_.load(std::memory_order_relaxed), max_hz);
@@ -290,12 +329,22 @@ float Planner::recommend_fire_rate_hz(double p_hit, double eff_thresh, bool plat
     return static_cast<float>(max_hz);
   }
 
+  const double heat = heat_ratio_.load(std::memory_order_relaxed);
+  // 前哨站最大 DPS 解：热量充裕时满射频输出，避免窗口边缘降频损失有效 DPS
+  if (is_outpost) {
+    double rate = max_hz;
+    if (heat > 0.70) {
+      const double h_alpha = std::clamp((heat - 0.70) / 0.30, 0.0, 1.0);
+      rate = rate - h_alpha * (rate - min_hz);
+    }
+    return static_cast<float>(std::clamp(rate, min_hz, max_hz));
+  }
+
   const double ref_t = (eff_thresh > 1e-6) ? eff_thresh : 0.70;
   const double span = std::max(0.05, 0.92 - ref_t);
   const double alpha = std::clamp((p_hit - ref_t) / span, 0.0, 1.0);
   double rate = min_hz + alpha * (max_hz - min_hz);
 
-  const double heat = heat_ratio_.load(std::memory_order_relaxed);
   if (heat > 0.70) {
     const double h_alpha = std::clamp((heat - 0.70) / 0.30, 0.0, 1.0);
     rate = rate - h_alpha * (rate - min_hz);
@@ -330,10 +379,11 @@ bool Planner::check_ballistic_hit(
   const double armor_h = (hit_target.armor_type == ArmorType::big) ? 0.127 : 0.125;
   const double half_w = 0.5 * armor_w;
   const double half_h = 0.5 * armor_h;
-  const double mount_pitch =
-    (hit_target.name == ArmorName::outpost) ? (-15.0 * M_PI / 180.0) : (15.0 * M_PI / 180.0);
-  const double allow_half_w = std::max(0.0, fire_margin_ * half_w);
-  const double allow_half_h = std::max(0.0, fire_margin_ * half_h);
+  const bool is_outpost = (hit_target.name == ArmorName::outpost);
+  const double mount_pitch = is_outpost ? (-15.0 * M_PI / 180.0) : (15.0 * M_PI / 180.0);
+  const double eff_margin = is_outpost ? outpost_fire_margin_ : fire_margin_;
+  const double allow_half_w = std::max(0.0, eff_margin * half_w);
+  const double allow_half_h = std::max(0.0, eff_margin * half_h);
 
   // 考虑我方滚转角 roll 带来的炮口 3D 偏移，以及我方世界系线速度 self_vel 与空气阻力 air_k_
   const Eigen::Vector3d muzzle_pos =
@@ -373,7 +423,7 @@ bool Planner::check_ballistic_hit(
   }
 
   const Eigen::Vector3d segs[2][2] = {{p_lo, p_mid}, {p_mid, p_hi}};
-  const double cos_max_inc = std::cos(max_fire_angle_);
+  const double cos_max_inc = std::cos(is_outpost ? outpost_max_fire_angle_ : max_fire_angle_);
   const double prob_thresh = fire_prob_thresh_.load(std::memory_order_relaxed);
   const bool use_prob = (prob_thresh > 1e-6);
 
@@ -516,7 +566,8 @@ bool Planner::check_ballistic_hit(
                            double p_phys, double y_n, double z_n, double cos_i, double dist_m,
                            double sy_m, double sz_m, double & out_delta) -> double {
     out_delta = 0.0;
-    if (!use_fire_mlp_.load(std::memory_order_relaxed) || !fire_mlp_.has_weights()) {
+    // Layer 3 MLP 针对四板移动/跑打步兵训练，前哨站为静止三板匀速目标，直接使用精准的 Layer 2 P_phys
+    if (is_outpost || !use_fire_mlp_.load(std::memory_order_relaxed) || !fire_mlp_.has_weights()) {
       return p_phys;
     }
     const double xy_r = std::max(1e-3, std::hypot(x[0], x[2]));
@@ -538,7 +589,8 @@ bool Planner::check_ballistic_hit(
             best_p_phys, near_y_norm, near_z_norm, near_cos_inc, near_dist, best_sig_y, best_sig_z,
             delta)
         : 0.0;
-    const double eff_thresh = has_near_hit ? effective_fire_thresh(near_dist) : prob_thresh;
+    const double eff_thresh =
+      has_near_hit ? effective_fire_thresh(near_dist, is_outpost) : prob_thresh;
     if (out_diag && has_near_hit) {
       out_diag->valid = true;
       out_diag->hit_y_norm = near_y_norm;
@@ -767,9 +819,10 @@ Plan Planner::plan(
     const int cur_plate = plan.diag.hit_plate_id;
     const bool plate_switched =
       (cur_plate >= 0 && last_fire_plate_id_ >= 0 && cur_plate != last_fire_plate_id_);
+    const bool is_outpost = (hit_now.name == ArmorName::outpost);
     plan.fire_plate_id = cur_plate;
     plan.fire_rate_hz =
-      recommend_fire_rate_hz(plan.diag.p_hit, plan.diag.eff_thresh, plate_switched);
+      recommend_fire_rate_hz(plan.diag.p_hit, plan.diag.eff_thresh, plate_switched, is_outpost);
     plan.diag.fire_rate_hz = plan.fire_rate_hz;
     if (cur_plate >= 0) last_fire_plate_id_ = cur_plate;
   } else {

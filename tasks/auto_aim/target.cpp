@@ -116,8 +116,8 @@ void Target::predict(double dt, const Eigen::Vector3d & self_vel)
   // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
   double v1, v1_z, v2;
   if (name == ArmorName::outpost) {
-    v1 = 10;    // 前哨站水平加速度方差
-    v1_z = 1;   // 前哨站竖直加速度方差
+    v1 = 0.5;   // 前哨站为静止建筑，仅保留微量水平过程噪声应对自身跑打/外参残差，避免远距 P 虚高
+    v1_z = 0.2; // 前哨站竖直加速度方差
     v2 = 0.1;   // 前哨站角加速度方差
   } else {
     v1 = 8;     // 水平加速度方差：抑制云台快速跟随时图像-姿态微小错位被吸成假平动速度
@@ -132,20 +132,21 @@ void Target::predict(double dt, const Eigen::Vector3d & self_vel)
   // 倾角与高度差是常量，给很小的过程噪声，避免 P 在早期塌成 0 后学不动。
   const double v_tilt = 1e-4;
   const double v_h = 1e-3;
+  const double q_9 = (armor_num_ == 3 && name == ArmorName::outpost) ? c * v_h : 0.0;
   Eigen::MatrixXd Q{
-    {a * v1, b * v1,      0,      0,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {b * v1, c * v1,      0,      0,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0, a * v1, b * v1,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0, b * v1, c * v1,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0, a * v1_z, b * v1_z,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0, b * v1_z, c * v1_z,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0,        0,        0, a * v2, b * v2, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0,        0,        0, b * v2, c * v2, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0,        0,        0,      0,      0, 0, 0,       0,       0,       0},
-    {     0,      0,      0,      0,        0,        0,      0,      0, 0, 0, c * v_h,       0,       0},
-    {     0,      0,      0,      0,        0,        0,      0,      0, 0, 0,       0, c * v_tilt,    0},
-    {     0,      0,      0,      0,        0,        0,      0,      0, 0, 0,       0,       0, c * v_tilt}
+    {a * v1, b * v1,      0,      0,        0,        0,      0,      0, 0,   0,       0,       0,       0},
+    {b * v1, c * v1,      0,      0,        0,        0,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0, a * v1, b * v1,        0,        0,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0, b * v1, c * v1,        0,        0,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0, a * v1_z, b * v1_z,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0, b * v1_z, c * v1_z,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0,        0,        0, a * v2, b * v2, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0,        0,        0, b * v2, c * v2, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0,        0,        0,      0,      0, 0,   0,       0,       0,       0},
+    {     0,      0,      0,      0,        0,        0,      0,      0, 0, q_9,       0,       0,       0},
+    {     0,      0,      0,      0,        0,        0,      0,      0, 0,   0, c * v_h,       0,       0},
+    {     0,      0,      0,      0,        0,        0,      0,      0, 0,   0,       0, c * v_tilt,    0},
+    {     0,      0,      0,      0,        0,        0,      0,      0, 0,   0,       0,       0, c * v_tilt}
   };
   // clang-format on
 
@@ -335,7 +336,21 @@ bool Target::update_uvl(std::vector<Armor *> & armors, const Solver & solver)
       }
       cp *= 0.25f;
       if (perim_p < 1e-3) continue;
-      const double center_err = cv::norm(cp - cm);
+      const double dx = static_cast<double>(cp.x - cm.x);
+      const double dy = static_cast<double>(cp.y - cm.y);
+      // 前哨站三板各自高度差 x[9]/x[10] 未收敛前，按对应协方差 3σ 投影放宽竖直匹配裕量，
+      // 水平 dx 保持严格约束；收敛后 P(9,9)/P(10,10) 塌缩，自动恢复严格 2D 匹配。
+      double dy_eff = std::abs(dy);
+      if (armor_num_ == 3 && name == ArmorName::outpost) {
+        const int h_idx = (candidates[ci] == 1) ? 9 : ((candidates[ci] == 2) ? 10 : -1);
+        if (h_idx >= 0) {
+          const double var_h = std::max(0.0, ekf_.P(h_idx, h_idx));
+          const double dist = std::max(0.5, h_armor_xyz(ekf_.x, candidates[ci]).norm());
+          const double dy_allow = 3.0 * solver.fy() * std::sqrt(var_h) / dist;
+          dy_eff = std::max(0.0, dy_eff - dy_allow);
+        }
+      }
+      const double center_err = std::hypot(dx, dy_eff);
       const double side_err = std::abs(perim_p - perim_m) / perim_p;
       const double cost = kWCenter * center_err + kWAngle * angle_err + kWSide * side_err;
       if (std::isfinite(cost) && cost < gate) {
@@ -505,7 +520,8 @@ cv::Rect Target::focus_roi(
   if (proj_pts.empty()) return full_rect;
 
   cv::Rect rect = cv::boundingRect(proj_pts);
-  const double expand = (name == ArmorName::base) ? 3.0 : 1.6;
+  const double expand =
+    (name == ArmorName::base) ? 3.0 : ((name == ArmorName::outpost) ? 2.5 : 1.6);
   const double cx = rect.x + rect.width * 0.5;
   const double cy = rect.y + rect.height * 0.5;
   double w = std::max(rect.width * expand, 256.0);
@@ -612,6 +628,15 @@ std::vector<Eigen::Vector<double, 6>> Target::armor_xyzayp_list() const
 bool Target::diverged() const
 {
   auto r_ok = ekf_.x[8] > 0.05 && ekf_.x[8] < 0.5;
+  if (armor_num_ == 3) {
+    // 三板目标（前哨站/基地）半径共用 x[8]；x[9]/x[10] 为板 1/板 2 相对板 0 的高度差
+    auto h_ok = std::abs(ekf_.x[9]) < 0.5 && std::abs(ekf_.x[10]) < 0.5;
+    if (r_ok && h_ok) return false;
+    tools::logger()->debug(
+      "[Target] outpost r={:.3f}, h1={:.3f}, h2={:.3f}", ekf_.x[8], ekf_.x[9], ekf_.x[10]);
+    return true;
+  }
+
   auto l_ok = ekf_.x[8] + ekf_.x[9] > 0.05 && ekf_.x[8] + ekf_.x[9] < 0.5;
 
   if (r_ok && l_ok) return false;
@@ -664,11 +689,12 @@ Eigen::Vector3d Target::armor_offset(const Eigen::VectorXd & x, int id, int armo
 // 计算出装甲板中心的坐标（考虑长短轴和装甲环倾角）
 Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
 {
-  // 前哨站/基地三块板没有第二组半径和高度，也不估计倾角。
-  // 平衡两块板和普通四块板都走倾斜环。1 号英雄是四块板。
+  // 前哨站/基地三块板共用半径 x[8]，不估计倾角；
+  // 复用闲置的 x[9]/x[10] 分别表示板 1、板 2 相对板 0 的在线高度差（KI-002）。
   if (armor_num_ == 3) {
     const double angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
-    return {x[0] - x[8] * std::cos(angle), x[2] - x[8] * std::sin(angle), x[4]};
+    const double dz = (id == 1) ? x[9] : ((id == 2) ? x[10] : 0.0);
+    return {x[0] - x[8] * std::cos(angle), x[2] - x[8] * std::sin(angle), x[4] + dz};
   }
   return Eigen::Vector3d{x[0], x[2], x[4]} + armor_offset(x, id, armor_num_);
 }

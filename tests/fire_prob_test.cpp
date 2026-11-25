@@ -758,6 +758,17 @@ int main(int argc, char ** argv)
   const double tau_burst_heat = bench_planner.effective_fire_thresh(2.0);  // 0.55
   const float rate_burst = bench_planner.recommend_fire_rate_hz(0.60, 0.55, false);
 
+  // 验证前哨站最大 DPS 策略：远距不走 Peek 抬升，热量充裕时满射频，高热量时平滑抬升保有效 DPS
+  rp.set("planner.fire_mode", 0.0);
+  rp.set("planner.heat_ratio", 0.0);
+  rp.set("planner.outpost_fire_prob_thresh", 0.45);
+  const double tau_outpost_far = bench_planner.effective_fire_thresh(6.5, true);    // 0.45
+  const float rate_outpost_cool = bench_planner.recommend_fire_rate_hz(0.50, 0.45, false, true);  // 10.0 Hz
+  rp.set("planner.heat_ratio", 0.85);  // +0.075 -> 0.525
+  const double tau_outpost_heat = bench_planner.effective_fire_thresh(6.5, true);   // 0.525
+  const float rate_outpost_heat = bench_planner.recommend_fire_rate_hz(0.60, 0.525, false, true); // 8.0 Hz
+  rp.set("planner.heat_ratio", 0.0);
+
   const bool rp_ok =
     std::abs(rp.get("planner.gun_sigma_yaw").value_or(0.0) - 0.55) < 1e-4 &&
     std::abs(rp.get("planner.gun_sigma_pitch").value_or(0.0) - 0.45) < 1e-4 &&
@@ -766,7 +777,9 @@ int main(int argc, char ** argv)
     std::abs(tau_lvl - 0.62) < 1e-4 && std::abs(tau_burst - 0.47) < 1e-4 &&
     std::abs(tau_cap - 0.90) < 1e-4 && std::abs(tau_heat - 0.74) < 1e-4 &&
     std::abs(tau_burst_heat - 0.55) < 1e-4 && std::abs(rate_edge - 6.0f) < 1e-3f &&
-    std::abs(rate_switch - 10.0f) < 1e-3f && std::abs(rate_burst - 10.0f) < 1e-3f;
+    std::abs(rate_switch - 10.0f) < 1e-3f && std::abs(rate_burst - 10.0f) < 1e-3f &&
+    std::abs(tau_outpost_far - 0.45) < 1e-4 && std::abs(tau_outpost_heat - 0.525) < 1e-4 &&
+    std::abs(rate_outpost_cool - 10.0f) < 1e-3f && std::abs(rate_outpost_heat - 8.0f) < 1e-3f;
 
   std::printf(
     "\n[性能与接口] FireResidualMLP 单次推理 = %.0f ns (%.3f us), trained=%d, "

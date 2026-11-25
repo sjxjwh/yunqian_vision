@@ -4,12 +4,14 @@
 #include <Eigen/Geometry>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <tuple>
 
 #include "serial/serial.h"
+#include "tools/sync_recorder.hpp"
 #include "tools/thread_safe_queue.hpp"
 
 namespace io
@@ -85,6 +87,9 @@ public:
 
   void send(io::VisionToGimbal VisionToGimbal);
 
+  /// 注册高频串口/IMU 样本回调（在 read_thread 中 1000 Hz 触发，用于 SyncRecorder 同步录制）
+  void set_sample_callback(std::function<void(const tools::SyncImuSample &)> cb);
+
 private:
   serial::Serial serial_;
 
@@ -118,6 +123,9 @@ private:
   GimbalState state_;
   tools::ThreadSafeQueue<std::tuple<Eigen::Quaterniond, std::chrono::steady_clock::time_point>>
     queue_{1000};
+
+  mutable std::mutex callback_mtx_;
+  std::function<void(const tools::SyncImuSample &)> sample_callback_;
 
   bool read(uint8_t * buffer, size_t size);
   void read_thread();
