@@ -123,8 +123,16 @@ int main(int argc, char * argv[])
   auto_aim::Plan latest_plan{};
 
   auto plan_thread = std::thread([&]() {
+    auto next_tick = std::chrono::steady_clock::now();
     while (!quit) {
-      if (!target_queue.empty() && mode == io::GimbalMode::AUTO_AIM) {
+      const auto cur_mode = mode.load();
+      const bool run_auto_aim =
+        (cur_mode == io::GimbalMode::AUTO_AIM || cur_mode == io::GimbalMode::IDLE);
+      if (!target_queue.empty() && run_auto_aim) {
+        const auto now_tick = std::chrono::steady_clock::now();
+        if (now_tick > next_tick + 20ms) next_tick = now_tick;
+        next_tick += 10ms;
+
         auto target = target_queue.front();
         auto gs = gimbal.state();
         auto_aim::SelfMotion self_motion;
@@ -132,20 +140,26 @@ int main(int argc, char * argv[])
         self_motion.roll = static_cast<double>(gs.roll);
         auto plan =
           planner.plan(target, gs.bullet_speed, Eigen::Vector2d(gs.yaw, gs.pitch), 0.0, self_motion);
-        if (no_fire) plan.fire = false;
+        if (no_fire || cur_mode != io::GimbalMode::AUTO_AIM) plan.fire = false;
 
         {
           std::lock_guard<std::mutex> lk(plan_mtx);
           latest_plan = plan;
         }
 
-        gimbal.send(
-          plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel,
-          plan.pitch_acc);
+        // IDLE 时仅本地识别/预测与 WebViewer 预览，不下发控制指令（电控不跟随）
+        if (cur_mode == io::GimbalMode::AUTO_AIM) {
+          gimbal.send(
+            plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch,
+            plan.pitch_vel, plan.pitch_acc);
+        } else {
+          gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
+        }
 
-        std::this_thread::sleep_for(10ms);
+        std::this_thread::sleep_until(next_tick);
       } else {
         std::this_thread::sleep_for(50ms);
+        next_tick = std::chrono::steady_clock::now();
       }
     }
   });
@@ -175,8 +189,8 @@ int main(int argc, char * argv[])
     std::list<auto_aim::Target> targets_vis;
     cv::Rect focus_roi(0, 0, img.cols, img.rows);
 
-    /// 自瞄
-    if (mode.load() == io::GimbalMode::AUTO_AIM) {
+    /// 自瞄（IDLE 下也持续识别与 EKF 预测，仅在 plan_thread 中拦截控制输出）
+    if (mode.load() == io::GimbalMode::AUTO_AIM || mode.load() == io::GimbalMode::IDLE) {
       const Eigen::Vector3d self_vel(gs.vx, gs.vy, gs.vz);
       focus_roi = tracker.focus_roi(img.size(), t, self_vel);
       auto armors = yolo.detect(img, focus_roi);

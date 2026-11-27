@@ -101,7 +101,7 @@ gimbal_pitch_zeta: 1.121
 
 #####-----仿真相机-----#####
 # 仿真默认 1440x1080、垂直视场角 45°，由 compute_camera_intrinsics 算出。
-# 与 bevy_robomaster_simulator/config.toml 中 [projectile].speed = 25.0 对齐。
+# 与 .sim/run/config.toml 中 [projectile].speed = 25.0 对齐。
 bullet_speed: 25
 
 # 仿真云台与 IMU 体轴重合，单位阵即可。

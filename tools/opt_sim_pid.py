@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 仿真云台 PID (kp, kd) 离线代价函数优化脚本（纯 Python 3 标准库）。
-精确复现 bevy_robomaster_simulator/src/systems/gimbal_pid.rs 的离散运动学闭环：
+精确复现 daedalus 仿真器（gimbal_pid）的离散运动学闭环：
   rate_k = clip(kp * e_k + kd * (e_k - e_{k-1}) / dt_k, -max_rate, max_rate)
   y_{k+1} = y_k + rate_k * dt_k
 结合 daedalus 实测帧时间波动 dt_k，在阶跃 + 4.7 Hz 小陀螺锯齿波 + 最坏掉帧工况下

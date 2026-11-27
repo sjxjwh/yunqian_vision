@@ -13,7 +13,7 @@ namespace io
 namespace talos
 {
 
-// 与 bevy_robomaster_simulator/crates/talos-ipc/src/layout.rs 逐字节对齐。
+// 与 Talos IPC (talos-ipc) 共享内存布局逐字节对齐。
 // 仿真是生产者，本侧只读图像/位姿/内参，只写云台指令。改字段前先对那边的
 // size_of 与 offset_of 断言，两边不一致时宁可拒绝连接也不要读错。
 

@@ -23,7 +23,7 @@ roi:
 use_roi: false
 
 #####-----传统方法参数-----#####
-threshold: 150
+threshold: 110
 max_angle_error: 45 # degree
 min_lightbar_ratio: 1.5
 max_lightbar_ratio: 20
@@ -46,8 +46,8 @@ pitch_offset: 0.0 # degree（新车联调先清零，原旧车值为 6.5）
 comming_angle: 55 # degree
 leaving_angle: 20 # degree
 decision_speed: 7 # rad/s
-high_speed_delay_time: 0.020 # s (开启速度/加速度前馈后实测零相位点，0.060s 超前约 40ms)
-low_speed_delay_time: 0.020  # s planner use this value
+high_speed_delay_time: 0.002 # s (Ki=35 后 0.005s 实测超前 10ms，微调至 0.002s 贴合线性段零相位)
+low_speed_delay_time: 0.002  # s planner use this value
 
 #####-----shooter参数-----#####
 first_tolerance: 3 # 近距离射击容差，degree
@@ -56,7 +56,7 @@ judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
-exposure_ms: 4.0
+exposure_ms: 3.0
 frame_rate: 100           # 相机出图上限（对齐 MPC 100 Hz，2~3 转/秒工况零丢帧且省 CPU/发热）
 gain: 16.9
 vid_pid: "2bdf:0001"
@@ -90,7 +90,7 @@ pitch_max_deg: 30.0       # Pitch 机械上限 (deg，抬头)
 R_gimbal2imu: [1, 0, 0, 0, 0, 1, 0, -1, 0]
 # 当前下位机 IMU 零漂且与编码器存在偏置，yaw/pitch 来自编码器；开启后由 yaw/pitch 直接构造四元数
 use_euler_q: true
-camera_latency_ms: 8.0    # 实测 8ms 远稳于 0ms（0ms 会引发云台-EKF 耦合发散）
+camera_latency_ms: 4.0    # 切回 IMU 世界系后实测二阶差分最优点为 4.0ms（0.067°）
 zero_vel_ff: false        # 开启下发速度/加速度前馈（yaw_vel/yaw_acc/pitch_vel/pitch_acc）
 yaw_kp: 0
 yaw_kd: 0
@@ -103,22 +103,22 @@ fire_thresh: 0.0035
 fire_margin: 0.70         # 3D 弹道-装甲面有效命中核心比例（兼顾 >90% 命中率与最长连续开火区间）
 max_fire_angle: 60        # degree，允许开火的最大 3D 入射角
 
-max_yaw_acc: 120.0        # rad/s^2 (实测 274.8 rad/s^2 安全裕度)
-Q_yaw: [2.5e7, 0]
+max_yaw_acc: 45.0         # rad/s^2 (对齐同济圆润钟形加速度曲线 ±35~45 rad/s^2，消除换板过冲)
+Q_yaw: [2.0e6, 0]
 R_yaw: [1]
-# 实车辨识: wn=35.54, zeta=0.517 (R^2=0.9475)；与速度前馈叠加会放大过冲，先置 0
+# 2026-11-27 实车辨识: wn=33.21, zeta=0.538 (R^2=0.9819)；与速度前馈叠加会放大过冲，先置 0
 gimbal_yaw_wn: 0.0
-gimbal_yaw_zeta: 0.517
+gimbal_yaw_zeta: 0.538
 Q_yaw_plant: [40.0, 0.08] # 传递函数 MPC 权重（加轻微速度阻尼抑制换板过冲）
 R_yaw_plant: [2.5]        # 惩罚换板瞬间激进预超调
 max_yaw_cmd_offset: 0.14  # rad (~8°)，限制单步指令相对偏移，防止过冲甩头
 
-max_pitch_acc: 88.4       # rad/s^2 (实测 110.5 rad/s^2 的 80% 安全裕度)
+max_pitch_acc: 91.2       # rad/s^2 (2026-11-27 实测 114.0 rad/s^2 的 80% 安全裕度)
 Q_pitch: [9e6, 0]
 R_pitch: [1]
-# 实车辨识: wn=47.36, zeta=0.909 (R^2=0.9911)；同上先置 0
+# 2026-11-27 实车辨识: wn=45.00, zeta=0.920 (R^2=0.9928)；同上先置 0
 gimbal_pitch_wn: 0.0
-gimbal_pitch_zeta: 0.909
+gimbal_pitch_zeta: 0.920
 
 #####-----buff_detector参数-----#####
 model: "assets/yolo11_buff_int8.xml"

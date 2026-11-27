@@ -27,8 +27,9 @@
 |---|---|---|
 | 上游视觉基线 | `/home/scj/桌面/rm2027/opensource/sp_vision_25` | `bd9f5e7` |
 | Orin NX 适配参考 | `/home/scj/桌面/rm2027/27-wheel-leg-wbc` (`origin/vision`) | `93cb1b1` |
-| 仿真参考 | `/home/scj/桌面/rm2027/opensource/bevy_robomaster_simulator` | `07af246` |
 | 自瞄算法参考 | `/home/scj/桌面/rm2027/opensource/awakening` (`WUST-RM/awakening`) | `7a0c4ba` |
+
+> 仿真运行环境与资源已内聚至本仓库 `.sim/run/` 与 `.rust/target/release/daedalus`（gitignored），不依赖外部上游仿真仓库。
 
 **2027 规则与协议 PDF**（可用 `pdftotext -layout` 检索）：
 - `/home/scj/桌面/rm2027/rule/UTF-8__RoboMaster 2027 机甲大师超级对抗赛比赛规则手册V1.0.0（20261015）.pdf`
